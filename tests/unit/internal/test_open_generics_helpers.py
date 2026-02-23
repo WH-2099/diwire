@@ -463,12 +463,14 @@ def test_open_generic_resolver_dispatch_cache_uses_normalized_key_and_materializ
     )
     dependency = Annotated[_Generic[int], "meta"]
 
-    first = resolver.resolve(dependency)
+    with pytest.raises(RuntimeError, match="Open generic materialization failed"):
+        resolver.resolve(dependency)
+
     second = resolver.resolve(dependency)
 
-    assert first is not second
     assert find_best_match_calls == 2
     assert callback_calls == 1
+    assert second is not None
 
 
 @pytest.mark.asyncio

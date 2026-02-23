@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import threading
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from contextlib import asynccontextmanager, contextmanager
@@ -47,6 +48,7 @@ OpenBindingKind = Literal["dependency", "generic_argument", "generic_argument_ty
 _MISSING_CACHE = object()
 _MAYBE_UNHANDLED = object()
 _UNSET_CACHE = object()
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1341,8 +1343,17 @@ class _OpenGenericResolver:  # pragma: no cover
         attempted_dependencies.add(dependency)
         try:
             callback(dependency, match)
-        except Exception:  # noqa: BLE001
-            return
+        except Exception as err:
+            logger.exception(
+                "Open generic materialization failed for dependency=%r match=%r.",
+                dependency,
+                match,
+            )
+            msg = (
+                "Open generic materialization failed for "
+                f"dependency={dependency!r} match={match!r}."
+            )
+            raise RuntimeError(msg) from err
 
     def materialization_attempted_dependencies(self) -> set[Any]:
         return self._materialization_attempted_dependencies
