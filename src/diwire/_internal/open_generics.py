@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import threading
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from types import TracebackType
@@ -81,6 +81,12 @@ class _OpenGenericMatch:
     spec: _OpenGenericSpec
     typevar_map: dict[TypeVar, Any]
     specificity: int
+
+
+@dataclass(frozen=True, slots=True)
+class _OpenGenericDispatchEntry:
+    dependency: Any
+    match: _OpenGenericMatch
 
 
 def canonicalize_open_key(dependency: Any) -> Any | None:
@@ -339,6 +345,7 @@ class _OpenGenericResolver:  # pragma: no cover
         scope_level: int,
         root_wrapper: _OpenGenericResolver | None = None,
         parent_wrapper: _OpenGenericResolver | None = None,
+        materialize_closed_callback: Callable[[Any, _OpenGenericMatch], None] | None = None,
     ) -> None:
         self._base_resolver = base_resolver
         self._registry = registry
@@ -355,18 +362,41 @@ class _OpenGenericResolver:  # pragma: no cover
             getattr(base_resolver, "_cleanup_enabled", True),
         )
         self._owned_scope_wrappers: tuple[_OpenGenericResolver, ...] = ()
+        if root_wrapper is None:
+            self._sync_dispatch_cache: dict[Any, _OpenGenericDispatchEntry] = {}
+            self._async_dispatch_cache: dict[Any, _OpenGenericDispatchEntry] = {}
+            self._sync_base_dispatch: set[Any] = set()
+            self._async_base_dispatch: set[Any] = set()
+            self._materialization_attempted_dependencies: set[Any] = set()
+        else:
+            (
+                self._sync_dispatch_cache,
+                self._async_dispatch_cache,
+                self._sync_base_dispatch,
+                self._async_base_dispatch,
+            ) = self._root_wrapper.shared_dispatch_state()
+            self._materialization_attempted_dependencies = (
+                self._root_wrapper.materialization_attempted_dependencies()
+            )
+        self._materialize_closed_callback = materialize_closed_callback
 
     def resolve(self, dependency: Any) -> Any:
-        maybe_value = self._resolve_maybe_sync(dependency=dependency)
-        if maybe_value is not _MAYBE_UNHANDLED:
-            return maybe_value
-        if is_provider_annotation(dependency):
-            inner_dependency = strip_provider_annotation(dependency)
-            if is_async_provider_annotation(dependency):
-                return lambda: self.aresolve(inner_dependency)
-            return lambda: self.resolve(inner_dependency)
+        preflight_value = self._resolve_sync_preflight(dependency=dependency)
+        if preflight_value is not _MISSING_CACHE:
+            return preflight_value
+
+        dispatch_entry = self._resolve_dispatch_entry(
+            dependency=dependency,
+            cache=self._sync_dispatch_cache,
+        )
+        if dispatch_entry is not None:
+            return self._resolve_open_match_sync(
+                dependency=dispatch_entry.dependency,
+                match=dispatch_entry.match,
+            )
+
         try:
-            return self._base_resolver.resolve(dependency)
+            resolved = self._base_resolver.resolve(dependency)
         except DIWireDependencyNotRegisteredError:
             normalized_dependency = strip_non_component_annotation(dependency)
             if normalized_dependency is not dependency:
@@ -374,30 +404,41 @@ class _OpenGenericResolver:  # pragma: no cover
                     return self._base_resolver.resolve(normalized_dependency)
                 except DIWireDependencyNotRegisteredError:
                     pass
-
-            open_match = self._registry.find_best_match(dependency)
-            match_dependency = dependency
-            if open_match is None and normalized_dependency is not dependency:
-                open_match = self._registry.find_best_match(normalized_dependency)
-                match_dependency = normalized_dependency
-            if open_match is None:
-                raise
-            return self._resolve_open_match_sync(
-                dependency=match_dependency,
-                match=open_match,
+            open_dispatch_entry = self._find_and_cache_open_dispatch_entry(
+                dependency=dependency,
+                normalized_dependency=normalized_dependency,
             )
+            if open_dispatch_entry is None:
+                raise
+            self._materialize_closed_dependency_once(
+                dependency=open_dispatch_entry.dependency,
+                match=open_dispatch_entry.match,
+            )
+            return self._resolve_open_match_sync(
+                dependency=open_dispatch_entry.dependency,
+                match=open_dispatch_entry.match,
+            )
+        else:
+            self._sync_base_dispatch.add(dependency)
+            return resolved
 
     async def aresolve(self, dependency: Any) -> Any:
-        maybe_value = await self._resolve_maybe_async(dependency=dependency)
-        if maybe_value is not _MAYBE_UNHANDLED:
-            return maybe_value
-        if is_provider_annotation(dependency):
-            inner_dependency = strip_provider_annotation(dependency)
-            if is_async_provider_annotation(dependency):
-                return lambda: self.aresolve(inner_dependency)
-            return lambda: self.resolve(inner_dependency)
+        preflight_value = await self._resolve_async_preflight(dependency=dependency)
+        if preflight_value is not _MISSING_CACHE:
+            return preflight_value
+
+        dispatch_entry = self._resolve_dispatch_entry(
+            dependency=dependency,
+            cache=self._async_dispatch_cache,
+        )
+        if dispatch_entry is not None:
+            return await self._resolve_open_match_async(
+                dependency=dispatch_entry.dependency,
+                match=dispatch_entry.match,
+            )
+
         try:
-            return await self._base_resolver.aresolve(dependency)
+            resolved = await self._base_resolver.aresolve(dependency)
         except DIWireDependencyNotRegisteredError:
             normalized_dependency = strip_non_component_annotation(dependency)
             if normalized_dependency is not dependency:
@@ -405,18 +446,23 @@ class _OpenGenericResolver:  # pragma: no cover
                     return await self._base_resolver.aresolve(normalized_dependency)
                 except DIWireDependencyNotRegisteredError:
                     pass
-
-            open_match = self._registry.find_best_match(dependency)
-            match_dependency = dependency
-            if open_match is None and normalized_dependency is not dependency:
-                open_match = self._registry.find_best_match(normalized_dependency)
-                match_dependency = normalized_dependency
-            if open_match is None:
-                raise
-            return await self._resolve_open_match_async(
-                dependency=match_dependency,
-                match=open_match,
+            open_dispatch_entry = self._find_and_cache_open_dispatch_entry(
+                dependency=dependency,
+                normalized_dependency=normalized_dependency,
             )
+            if open_dispatch_entry is None:
+                raise
+            self._materialize_closed_dependency_once(
+                dependency=open_dispatch_entry.dependency,
+                match=open_dispatch_entry.match,
+            )
+            return await self._resolve_open_match_async(
+                dependency=open_dispatch_entry.dependency,
+                match=open_dispatch_entry.match,
+            )
+        else:
+            self._async_base_dispatch.add(dependency)
+            return resolved
 
     def _is_registered_dependency(self, dependency: Any) -> bool:
         base_registered_checker = getattr(self._base_resolver, "_is_registered_dependency", None)
@@ -510,6 +556,7 @@ class _OpenGenericResolver:  # pragma: no cover
                 scope_level=next_scope.level,
                 root_wrapper=self._root_wrapper,
                 parent_wrapper=current_wrapper,
+                materialize_closed_callback=self._materialize_closed_callback,
             )
             created_wrappers.append(current_wrapper)
 
@@ -985,6 +1032,118 @@ class _OpenGenericResolver:  # pragma: no cover
     def _raise_scope_mismatch(self, required_scope_level: int) -> NoReturn:
         msg = f"Dependency requires opened scope level {required_scope_level}."
         raise DIWireScopeMismatchError(msg)
+
+    @staticmethod
+    def _resolve_dispatch_entry(
+        *,
+        dependency: Any,
+        cache: dict[Any, _OpenGenericDispatchEntry],
+    ) -> _OpenGenericDispatchEntry | None:
+        return cache.get(dependency)
+
+    def _cache_dispatch_entry(
+        self,
+        *,
+        dependency: Any,
+        normalized_dependency: Any,
+        dispatch_entry: _OpenGenericDispatchEntry,
+    ) -> None:
+        for cache in (self._sync_dispatch_cache, self._async_dispatch_cache):
+            cache[dependency] = dispatch_entry
+            cache[dispatch_entry.dependency] = dispatch_entry
+            if (
+                normalized_dependency is not dependency
+                and dispatch_entry.dependency is normalized_dependency
+            ):
+                cache[normalized_dependency] = dispatch_entry
+
+    def _find_and_cache_open_dispatch_entry(
+        self,
+        *,
+        dependency: Any,
+        normalized_dependency: Any,
+    ) -> _OpenGenericDispatchEntry | None:
+        open_match = self._registry.find_best_match(dependency)
+        match_dependency = dependency
+        if open_match is None and normalized_dependency is not dependency:
+            open_match = self._registry.find_best_match(normalized_dependency)
+            match_dependency = normalized_dependency
+        if open_match is None:
+            return None
+        dispatch_entry = _OpenGenericDispatchEntry(
+            dependency=match_dependency,
+            match=open_match,
+        )
+        self._cache_dispatch_entry(
+            dependency=dependency,
+            normalized_dependency=normalized_dependency,
+            dispatch_entry=dispatch_entry,
+        )
+        return dispatch_entry
+
+    def _materialize_closed_dependency_once(
+        self,
+        *,
+        dependency: Any,
+        match: _OpenGenericMatch,
+    ) -> None:
+        callback = self._materialize_closed_callback
+        if callback is None:
+            return
+        attempted_dependencies = self._root_wrapper.materialization_attempted_dependencies()
+        if dependency in attempted_dependencies:
+            return
+        attempted_dependencies.add(dependency)
+        try:
+            callback(dependency, match)
+        except Exception:  # noqa: BLE001
+            return
+
+    def materialization_attempted_dependencies(self) -> set[Any]:
+        return self._materialization_attempted_dependencies
+
+    def shared_dispatch_state(
+        self,
+    ) -> tuple[
+        dict[Any, _OpenGenericDispatchEntry],
+        dict[Any, _OpenGenericDispatchEntry],
+        set[Any],
+        set[Any],
+    ]:
+        return (
+            self._sync_dispatch_cache,
+            self._async_dispatch_cache,
+            self._sync_base_dispatch,
+            self._async_base_dispatch,
+        )
+
+    def _resolve_sync_preflight(self, *, dependency: Any) -> Any:
+        if dependency in self._sync_base_dispatch:
+            return self._base_resolver.resolve(dependency)
+        maybe_value = self._resolve_maybe_sync(dependency=dependency)
+        if maybe_value is not _MAYBE_UNHANDLED:
+            return maybe_value
+        if not is_provider_annotation(dependency):
+            return _MISSING_CACHE
+        inner_dependency = strip_provider_annotation(dependency)
+        provider_factory = (
+            self.aresolve if is_async_provider_annotation(dependency) else self.resolve
+        )
+        return lambda: provider_factory(inner_dependency)
+
+    async def _resolve_async_preflight(self, *, dependency: Any) -> Any:
+        if dependency in self._async_base_dispatch:
+            return await self._base_resolver.aresolve(dependency)
+        maybe_value = await self._resolve_maybe_async(dependency=dependency)
+        if maybe_value is not _MAYBE_UNHANDLED:
+            return maybe_value
+        if not is_provider_annotation(dependency):
+            return _MISSING_CACHE
+        inner_dependency = strip_provider_annotation(dependency)
+        provider_factory = (
+            self.aresolve if is_async_provider_annotation(dependency) else self.resolve
+        )
+        return lambda: provider_factory(inner_dependency)
 
 
 @dataclass(frozen=True, slots=True)

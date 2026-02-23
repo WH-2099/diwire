@@ -47,6 +47,8 @@ from diwire._internal.open_generics import (
     OpenGenericRegistry,
     OpenGenericResolver,
     canonicalize_open_key,
+    contains_typevar,
+    substitute_typevars,
 )
 from diwire._internal.policies import DependencyRegistrationPolicy, MissingPolicy
 from diwire._internal.providers import (
@@ -186,6 +188,7 @@ class Container:
         self._injected_callable_inspector = InjectedCallableInspector()
 
         self._root_resolver: ResolverProtocol | None = None
+        self._entered_root_resolver: ResolverProtocol | None = None
         self._graph_revision: int = 0
         self._registration_mutation_depth: int = 0
         self._registration_mutation_snapshot: _ContainerGraphSnapshot | None = None
@@ -194,6 +197,7 @@ class Container:
         self._decoration_chain_by_provides: dict[Any, _DecorationChain] = {}
         self._decoration_counter: int = 0
         self._injected_scope_contracts: list[_InjectedScopeContract] = []
+        self._runtime_materialized_closed_keys: set[Any] = set()
         self._container_entrypoints: dict[str, Callable[..., Any]] = {
             method_name: getattr(self, method_name) for method_name in self._ENTRYPOINT_METHOD_NAMES
         }
@@ -1667,6 +1671,157 @@ class Container:
 
         return _factory
 
+    def _materialize_closed_open_generic_spec(
+        self,
+        dependency: Any,
+        match: Any,
+    ) -> None:
+        if self._providers_registrations.find_by_type(dependency) is not None:
+            return
+
+        open_spec = match.spec
+        typevar_map = match.typevar_map
+
+        specialized_dependencies: list[ProviderDependency] = []
+        injected_dependencies: list[ProviderDependency] = []
+        injected_arguments: dict[str, Any] = {}
+        for binding in open_spec.bindings:
+            if binding.kind == "dependency":
+                resolved_dependency = substitute_typevars(binding.template, mapping=typevar_map)
+                if contains_typevar(resolved_dependency):
+                    return
+                specialized_dependencies.append(
+                    ProviderDependency(
+                        provides=resolved_dependency,
+                        parameter=binding.dependency.parameter,
+                    ),
+                )
+                continue
+
+            typevar = binding.typevar
+            if typevar is None:
+                return
+            argument_value = typevar_map.get(typevar, _MISSING_CLOSED_GENERIC_INJECTION)
+            if argument_value is _MISSING_CLOSED_GENERIC_INJECTION:
+                return
+            injected_dependencies.append(binding.dependency)
+            injected_arguments[binding.dependency.parameter.name] = argument_value
+
+        provider_kind = cast("str", open_spec.provider_kind)
+        provider_object = open_spec.provider
+        if injected_dependencies:
+            provider_object = self._build_materialized_provider_wrapper(
+                provider=provider_object,
+                injected_dependencies=tuple(injected_dependencies),
+                injected_arguments=injected_arguments,
+            )
+            if open_spec.provider_is_inject_wrapper:
+                provider_object.__dict__[INJECT_WRAPPER_MARKER] = True
+            if provider_kind == "concrete_type":
+                provider_kind = "factory"
+
+        if provider_kind == "concrete_type":
+            provider_spec = ProviderSpec(
+                provides=dependency,
+                concrete_type=cast("type[Any]", provider_object),
+                lifetime=open_spec.lifetime,
+                scope=open_spec.scope,
+                dependencies=specialized_dependencies,
+                is_async=open_spec.is_async,
+                is_any_dependency_async=open_spec.is_any_dependency_async,
+                needs_cleanup=open_spec.needs_cleanup,
+                lock_mode=open_spec.lock_mode,
+            )
+        elif provider_kind == "factory":
+            provider_spec = ProviderSpec(
+                provides=dependency,
+                factory=cast("FactoryProvider[Any]", provider_object),
+                lifetime=open_spec.lifetime,
+                scope=open_spec.scope,
+                dependencies=specialized_dependencies,
+                is_async=open_spec.is_async,
+                is_any_dependency_async=open_spec.is_any_dependency_async,
+                needs_cleanup=open_spec.needs_cleanup,
+                lock_mode=open_spec.lock_mode,
+            )
+        elif provider_kind == "generator":
+            provider_spec = ProviderSpec(
+                provides=dependency,
+                generator=cast("GeneratorProvider[Any]", provider_object),
+                lifetime=open_spec.lifetime,
+                scope=open_spec.scope,
+                dependencies=specialized_dependencies,
+                is_async=open_spec.is_async,
+                is_any_dependency_async=open_spec.is_any_dependency_async,
+                needs_cleanup=open_spec.needs_cleanup,
+                lock_mode=open_spec.lock_mode,
+            )
+        else:
+            provider_spec = ProviderSpec(
+                provides=dependency,
+                context_manager=cast("ContextManagerProvider[Any]", provider_object),
+                lifetime=open_spec.lifetime,
+                scope=open_spec.scope,
+                dependencies=specialized_dependencies,
+                is_async=open_spec.is_async,
+                is_any_dependency_async=open_spec.is_any_dependency_async,
+                needs_cleanup=open_spec.needs_cleanup,
+                lock_mode=open_spec.lock_mode,
+            )
+
+        self._providers_registrations.add(provider_spec)
+        self._runtime_materialized_closed_keys.add(dependency)
+        should_invalidate_compilation = (
+            provider_spec.lifetime is Lifetime.TRANSIENT
+            or provider_spec.scope.level > self._root_scope.level
+        )
+        if should_invalidate_compilation:
+            self._invalidate_compilation()
+
+    def _build_materialized_provider_wrapper(
+        self,
+        *,
+        provider: Any,
+        injected_dependencies: tuple[ProviderDependency, ...],
+        injected_arguments: dict[str, Any],
+    ) -> Callable[..., Any]:
+        supports_fast_kwargs = all(
+            dependency.parameter.kind
+            in {
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            }
+            for dependency in injected_dependencies
+        )
+
+        if supports_fast_kwargs:
+            captured_injected_arguments = dict(injected_arguments)
+
+            def _wrapper(*args: Any, **kwargs: Any) -> Any:
+                merged_kwargs = dict(kwargs)
+                for argument_name, argument_value in captured_injected_arguments.items():
+                    merged_kwargs.setdefault(argument_name, argument_value)
+                return provider(*args, **merged_kwargs)
+
+            return _wrapper
+
+        provider_signature = inspect.signature(provider)
+        captured_dependencies = tuple(injected_dependencies)
+        captured_injected_arguments = dict(injected_arguments)
+
+        def _bound_wrapper(*args: Any, **kwargs: Any) -> Any:
+            bound_arguments = provider_signature.bind_partial(*args, **kwargs)
+            for dependency in captured_dependencies:
+                argument_name = dependency.parameter.name
+                if argument_name in bound_arguments.arguments:
+                    continue
+                bound_arguments.arguments[argument_name] = captured_injected_arguments[
+                    argument_name
+                ]
+            return provider(*bound_arguments.args, **bound_arguments.kwargs)
+
+        return _bound_wrapper
+
     def _resolve_factory_registration_dependencies(
         self,
         *,
@@ -2456,6 +2611,7 @@ class Container:
                         root_scope=self._root_scope,
                         has_async_specs=has_async_specs,
                         scope_level=self._root_scope.level,
+                        materialize_closed_callback=self._materialize_closed_open_generic_spec,
                     ),
                 )
             if self._use_resolver_context:
@@ -2491,6 +2647,7 @@ class Container:
     @contextmanager
     def _registration_mutation(self) -> Generator[None, None, None]:
         if self._registration_mutation_depth == 0:
+            self._purge_runtime_materialized_closed_specs()
             self._registration_mutation_snapshot = _ContainerGraphSnapshot(
                 providers_registrations=self._providers_registrations.snapshot(),
                 open_generic_registry=self._open_generic_registry.snapshot(),
@@ -2539,6 +2696,21 @@ class Container:
                     self._invalidate_compilation()
                 self._registration_mutation_snapshot = None
                 self._registration_mutation_failed = False
+
+    def _purge_runtime_materialized_closed_specs(self) -> None:
+        if not self._runtime_materialized_closed_keys:
+            return
+        preserved_specs = [
+            spec
+            for spec in self._providers_registrations.values()
+            if spec.provides not in self._runtime_materialized_closed_keys
+        ]
+        providers_registrations = ProvidersRegistrations()
+        for spec in preserved_specs:
+            providers_registrations.add(spec)
+        self._providers_registrations = providers_registrations
+        self._runtime_materialized_closed_keys.clear()
+        self._invalidate_compilation()
 
     def _bind_container_entrypoints(
         self,
@@ -2788,6 +2960,7 @@ class Container:
     def __enter__(self) -> ResolverProtocol:
         """Enter the resolver context."""
         resolver = self.compile()
+        self._entered_root_resolver = resolver
         return resolver.__enter__()
 
     def __exit__(
@@ -2801,15 +2974,23 @@ class Container:
         Cleanup will happen ONLY if the resolver created resources that need to be cleaned up.
         Like context managers or generators.
         """
-        if self._root_resolver is None:
+        active_resolver = (
+            self._entered_root_resolver
+            if self._entered_root_resolver is not None
+            else self._root_resolver
+        )
+        if active_resolver is None:
             msg = "Container context exit called without a matching enter."
             raise RuntimeError(msg)
-
-        return self._root_resolver.__exit__(exc_type, exc_value, traceback)
+        try:
+            return active_resolver.__exit__(exc_type, exc_value, traceback)
+        finally:
+            self._entered_root_resolver = None
 
     def __aenter__(self) -> ResolverProtocol:
         """Asynchronously enter the resolver context."""
         resolver = self.compile()
+        self._entered_root_resolver = resolver
         return resolver.__aenter__()
 
     async def __aexit__(
@@ -2823,11 +3004,18 @@ class Container:
         Cleanup will happen ONLY if the resolver created resources that need to be cleaned up.
         Like context managers or generators.
         """
-        if self._root_resolver is None:
+        active_resolver = (
+            self._entered_root_resolver
+            if self._entered_root_resolver is not None
+            else self._root_resolver
+        )
+        if active_resolver is None:
             msg = "Container async context exit called without a matching enter."
             raise RuntimeError(msg)
-
-        return await self._root_resolver.__aexit__(exc_type, exc_value, traceback)
+        try:
+            return await active_resolver.__aexit__(exc_type, exc_value, traceback)
+        finally:
+            self._entered_root_resolver = None
 
     def close(
         self,
