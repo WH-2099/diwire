@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -59,7 +60,6 @@ def _raw_payload() -> dict[str, object]:
                 ),
                 "stats": {"ops": 300.0},
             },
-            {
             {
                 "name": "test_benchmark_diwire_resolve_singleton",
                 "fullname": (
@@ -169,6 +169,39 @@ def test_normalize_benchmark_report_can_use_explicit_library_filter() -> None:
         "| Scenario | diwire | rodi | dishka | wireup | speedup diwire/rodi "
         "| speedup diwire/dishka | speedup diwire/wireup |" in markdown
     )
+
+
+def test_normalize_benchmark_report_allows_missing_optional_library_entries() -> None:
+    payload = copy.deepcopy(_raw_payload())
+    benchmarks = payload["benchmarks"]
+    assert isinstance(benchmarks, list)
+    payload["benchmarks"] = [
+        entry
+        for entry in benchmarks
+        if (
+            entry["name"] != "test_benchmark_rodi_resolve_transient"
+            and entry["name"] != "test_benchmark_wireup_resolve_transient"
+        )
+    ]
+
+    report = normalize_benchmark_report(
+        payload,
+        source_raw_file="benchmark-results/raw-benchmark.json",
+    )
+
+    assert report.ops["rodi"]["resolve_transient"] is None
+    assert report.ops["wireup"]["resolve_transient"] is None
+    assert report.speedups["rodi"]["resolve_transient"] is None
+    assert report.speedups["wireup"]["resolve_transient"] is None
+    report_json = report.as_json_dict()
+    ops_json = cast("dict[str, dict[str, float | str]]", report_json["ops"])
+    speedups_json = cast("dict[str, dict[str, float | str]]", report_json["speedups"])
+    assert ops_json["rodi"]["resolve_transient"] == "-"
+    assert ops_json["wireup"]["resolve_transient"] == "-"
+    assert speedups_json["rodi"]["resolve_transient"] == "-"
+    assert speedups_json["wireup"]["resolve_transient"] == "-"
+    markdown = render_benchmark_markdown(report)
+    assert "| resolve_transient | 500 | - | 250 | - | - | 2.00x | - |" in markdown
 
 
 def test_normalize_benchmark_report_raises_for_missing_library_entry() -> None:
