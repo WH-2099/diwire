@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import threading
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from types import TracebackType
@@ -378,17 +378,45 @@ class _OpenGenericResolver:  # pragma: no cover
             self._materialization_attempted_dependencies = (
                 self._root_wrapper.materialization_attempted_dependencies()
             )
+        self._sync_base_slot_resolvers: dict[Any, Callable[[], Any]] = {}
+        self._async_base_slot_resolvers: dict[Any, Callable[[], Any]] = {}
+        self._sync_inline_dependency: Any = _MISSING_CACHE
+        self._sync_inline_resolver: Callable[[], Any] = self._missing_sync_inline_resolver
+        self._async_inline_dependency: Any = _MISSING_CACHE
+        self._async_inline_resolver: Callable[[], Awaitable[Any]] = (
+            self._missing_async_inline_resolver
+        )
         self._materialize_closed_callback = materialize_closed_callback
 
     def resolve(self, dependency: Any) -> Any:
-        preflight_value = self._resolve_sync_preflight(dependency=dependency)
-        if preflight_value is not _MISSING_CACHE:
-            return preflight_value
+        if dependency is self._sync_inline_dependency:
+            return self._sync_inline_resolver()
+        return self._resolve_sync_slow(dependency=dependency)
 
-        dispatch_entry = self._resolve_dispatch_entry(
+    async def aresolve(self, dependency: Any) -> Any:
+        if dependency is self._async_inline_dependency:
+            return await self._async_inline_resolver()
+        return await self._resolve_async_slow(dependency=dependency)
+
+    def _resolve_sync_slow(self, *, dependency: Any) -> Any:
+        slot_resolver = self._sync_base_slot_resolvers.get(dependency)
+        if slot_resolver is not None:
+            self._sync_inline_dependency = dependency
+            self._sync_inline_resolver = slot_resolver
+            return slot_resolver()
+
+        if dependency in self._sync_base_dispatch:
+            resolved = self._base_resolver.resolve(dependency)
+            self._sync_inline_dependency = _MISSING_CACHE
+            return resolved
+
+        annotation_preflight_value = self._resolve_sync_annotation_preflight(
             dependency=dependency,
-            cache=self._sync_dispatch_cache,
         )
+        if annotation_preflight_value is not _MISSING_CACHE:
+            return annotation_preflight_value
+
+        dispatch_entry = self._sync_dispatch_cache.get(dependency)
         if dispatch_entry is not None:
             return self._resolve_open_match_sync(
                 dependency=dispatch_entry.dependency,
@@ -397,40 +425,33 @@ class _OpenGenericResolver:  # pragma: no cover
 
         try:
             resolved = self._base_resolver.resolve(dependency)
-        except DIWireDependencyNotRegisteredError:
-            normalized_dependency = strip_non_component_annotation(dependency)
-            if normalized_dependency is not dependency:
-                try:
-                    return self._base_resolver.resolve(normalized_dependency)
-                except DIWireDependencyNotRegisteredError:
-                    pass
-            open_dispatch_entry = self._find_and_cache_open_dispatch_entry(
+        except DIWireDependencyNotRegisteredError as error:
+            return self._resolve_sync_open_generic_after_base_miss(
                 dependency=dependency,
-                normalized_dependency=normalized_dependency,
+                missing_error=error,
             )
-            if open_dispatch_entry is None:
-                raise
-            self._materialize_closed_dependency_once(
-                dependency=open_dispatch_entry.dependency,
-                match=open_dispatch_entry.match,
-            )
-            return self._resolve_open_match_sync(
-                dependency=open_dispatch_entry.dependency,
-                match=open_dispatch_entry.match,
-            )
-        else:
-            self._sync_base_dispatch.add(dependency)
+        self.cache_sync_base_resolver(dependency=dependency)
+        return resolved
+
+    async def _resolve_async_slow(self, *, dependency: Any) -> Any:
+        slot_resolver = self._async_base_slot_resolvers.get(dependency)
+        if slot_resolver is not None:
+            self._async_inline_dependency = dependency
+            self._async_inline_resolver = slot_resolver
+            return await slot_resolver()
+
+        if dependency in self._async_base_dispatch:
+            resolved = await self._base_resolver.aresolve(dependency)
+            self._async_inline_dependency = _MISSING_CACHE
             return resolved
 
-    async def aresolve(self, dependency: Any) -> Any:
-        preflight_value = await self._resolve_async_preflight(dependency=dependency)
-        if preflight_value is not _MISSING_CACHE:
-            return preflight_value
-
-        dispatch_entry = self._resolve_dispatch_entry(
+        annotation_preflight_value = await self._resolve_async_annotation_preflight(
             dependency=dependency,
-            cache=self._async_dispatch_cache,
         )
+        if annotation_preflight_value is not _MISSING_CACHE:
+            return annotation_preflight_value
+
+        dispatch_entry = self._async_dispatch_cache.get(dependency)
         if dispatch_entry is not None:
             return await self._resolve_open_match_async(
                 dependency=dispatch_entry.dependency,
@@ -439,30 +460,67 @@ class _OpenGenericResolver:  # pragma: no cover
 
         try:
             resolved = await self._base_resolver.aresolve(dependency)
-        except DIWireDependencyNotRegisteredError:
-            normalized_dependency = strip_non_component_annotation(dependency)
-            if normalized_dependency is not dependency:
-                try:
-                    return await self._base_resolver.aresolve(normalized_dependency)
-                except DIWireDependencyNotRegisteredError:
-                    pass
-            open_dispatch_entry = self._find_and_cache_open_dispatch_entry(
+        except DIWireDependencyNotRegisteredError as error:
+            return await self._resolve_async_open_generic_after_base_miss(
                 dependency=dependency,
-                normalized_dependency=normalized_dependency,
+                missing_error=error,
             )
-            if open_dispatch_entry is None:
-                raise
-            self._materialize_closed_dependency_once(
-                dependency=open_dispatch_entry.dependency,
-                match=open_dispatch_entry.match,
-            )
-            return await self._resolve_open_match_async(
-                dependency=open_dispatch_entry.dependency,
-                match=open_dispatch_entry.match,
-            )
-        else:
-            self._async_base_dispatch.add(dependency)
-            return resolved
+        self.cache_async_base_resolver(dependency=dependency)
+        return resolved
+
+    def _resolve_sync_open_generic_after_base_miss(
+        self,
+        *,
+        dependency: Any,
+        missing_error: DIWireDependencyNotRegisteredError,
+    ) -> Any:
+        normalized_dependency = strip_non_component_annotation(dependency)
+        if normalized_dependency is not dependency:
+            try:
+                return self._base_resolver.resolve(normalized_dependency)
+            except DIWireDependencyNotRegisteredError:
+                pass
+        open_dispatch_entry = self._find_and_cache_open_dispatch_entry(
+            dependency=dependency,
+            normalized_dependency=normalized_dependency,
+        )
+        if open_dispatch_entry is None:
+            raise missing_error
+        self._materialize_closed_dependency_once(
+            dependency=open_dispatch_entry.dependency,
+            match=open_dispatch_entry.match,
+        )
+        return self._resolve_open_match_sync(
+            dependency=open_dispatch_entry.dependency,
+            match=open_dispatch_entry.match,
+        )
+
+    async def _resolve_async_open_generic_after_base_miss(
+        self,
+        *,
+        dependency: Any,
+        missing_error: DIWireDependencyNotRegisteredError,
+    ) -> Any:
+        normalized_dependency = strip_non_component_annotation(dependency)
+        if normalized_dependency is not dependency:
+            try:
+                return await self._base_resolver.aresolve(normalized_dependency)
+            except DIWireDependencyNotRegisteredError:
+                pass
+        open_dispatch_entry = self._find_and_cache_open_dispatch_entry(
+            dependency=dependency,
+            normalized_dependency=normalized_dependency,
+        )
+        if open_dispatch_entry is None:
+            raise missing_error
+        self._materialize_closed_dependency_once(
+            dependency=open_dispatch_entry.dependency,
+            match=open_dispatch_entry.match,
+        )
+        return await self._resolve_open_match_async(
+            dependency=open_dispatch_entry.dependency,
+            match=open_dispatch_entry.match,
+        )
 
     def _is_registered_dependency(self, dependency: Any) -> bool:
         base_registered_checker = getattr(self._base_resolver, "_is_registered_dependency", None)
@@ -1033,14 +1091,6 @@ class _OpenGenericResolver:  # pragma: no cover
         msg = f"Dependency requires opened scope level {required_scope_level}."
         raise DIWireScopeMismatchError(msg)
 
-    @staticmethod
-    def _resolve_dispatch_entry(
-        *,
-        dependency: Any,
-        cache: dict[Any, _OpenGenericDispatchEntry],
-    ) -> _OpenGenericDispatchEntry | None:
-        return cache.get(dependency)
-
     def _cache_dispatch_entry(
         self,
         *,
@@ -1117,9 +1167,50 @@ class _OpenGenericResolver:  # pragma: no cover
             self._async_base_dispatch,
         )
 
-    def _resolve_sync_preflight(self, *, dependency: Any) -> Any:
-        if dependency in self._sync_base_dispatch:
-            return self._base_resolver.resolve(dependency)
+    def cache_sync_base_resolver(self, *, dependency: Any) -> None:
+        sync_slot_resolver = self._resolve_base_slot_resolver(
+            dependency=dependency,
+            slot_prefix="resolve_",
+        )
+        if sync_slot_resolver is not None:
+            self._sync_base_slot_resolvers[dependency] = cast(
+                "Callable[[], Any]", sync_slot_resolver
+            )
+            return
+        self._sync_base_dispatch.add(dependency)
+
+    def cache_async_base_resolver(self, *, dependency: Any) -> None:
+        async_slot_resolver = self._resolve_base_slot_resolver(
+            dependency=dependency,
+            slot_prefix="aresolve_",
+        )
+        if async_slot_resolver is not None:
+            self._async_base_slot_resolvers[dependency] = cast(
+                "Callable[[], Any]",
+                async_slot_resolver,
+            )
+            return
+        self._async_base_dispatch.add(dependency)
+
+    def _resolve_base_slot_resolver(
+        self,
+        *,
+        dependency: Any,
+        slot_prefix: Literal["resolve_", "aresolve_"],
+    ) -> Callable[..., Any] | None:
+        runtime = getattr(type(self._base_resolver), "_runtime", None)
+        dependency_slots = getattr(runtime, "dep_eq_slot_by_key", None)
+        if not isinstance(dependency_slots, dict):
+            return None
+        dependency_slot = dependency_slots.get(dependency)
+        if not isinstance(dependency_slot, int):
+            return None
+        slot_resolver = getattr(self._base_resolver, f"{slot_prefix}{dependency_slot}", None)
+        if not callable(slot_resolver):
+            return None
+        return slot_resolver
+
+    def _resolve_sync_annotation_preflight(self, *, dependency: Any) -> Any:
         maybe_value = self._resolve_maybe_sync(dependency=dependency)
         if maybe_value is not _MAYBE_UNHANDLED:
             return maybe_value
@@ -1131,9 +1222,7 @@ class _OpenGenericResolver:  # pragma: no cover
         )
         return lambda: provider_factory(inner_dependency)
 
-    async def _resolve_async_preflight(self, *, dependency: Any) -> Any:
-        if dependency in self._async_base_dispatch:
-            return await self._base_resolver.aresolve(dependency)
+    async def _resolve_async_annotation_preflight(self, *, dependency: Any) -> Any:
         maybe_value = await self._resolve_maybe_async(dependency=dependency)
         if maybe_value is not _MAYBE_UNHANDLED:
             return maybe_value
@@ -1144,6 +1233,16 @@ class _OpenGenericResolver:  # pragma: no cover
             self.aresolve if is_async_provider_annotation(dependency) else self.resolve
         )
         return lambda: provider_factory(inner_dependency)
+
+    @staticmethod
+    def _missing_sync_inline_resolver() -> NoReturn:
+        msg = "Inline resolver cache is not initialized."
+        raise RuntimeError(msg)
+
+    @staticmethod
+    async def _missing_async_inline_resolver() -> NoReturn:
+        msg = "Inline async resolver cache is not initialized."
+        raise RuntimeError(msg)
 
 
 @dataclass(frozen=True, slots=True)

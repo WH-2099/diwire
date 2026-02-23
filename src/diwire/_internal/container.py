@@ -1714,6 +1714,8 @@ class Container:
                 provider=provider_object,
                 injected_dependencies=tuple(injected_dependencies),
                 injected_arguments=injected_arguments,
+                has_runtime_dependencies=bool(specialized_dependencies),
+                provider_is_inject_wrapper=open_spec.provider_is_inject_wrapper,
             )
             if open_spec.provider_is_inject_wrapper:
                 provider_object.__dict__[INJECT_WRAPPER_MARKER] = True
@@ -1784,7 +1786,35 @@ class Container:
         provider: Any,
         injected_dependencies: tuple[ProviderDependency, ...],
         injected_arguments: dict[str, Any],
+        has_runtime_dependencies: bool,
+        provider_is_inject_wrapper: bool,
     ) -> Callable[..., Any]:
+        simple_parameter_kinds = {
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        }
+        if (
+            not has_runtime_dependencies
+            and not provider_is_inject_wrapper
+            and all(
+                dependency.parameter.kind in simple_parameter_kinds
+                for dependency in injected_dependencies
+            )
+        ):
+            provider_signature = inspect.signature(provider)
+            prebound_arguments = provider_signature.bind_partial()
+            for dependency in injected_dependencies:
+                argument_name = dependency.parameter.name
+                prebound_arguments.arguments[argument_name] = injected_arguments[argument_name]
+            prebuilt_args = prebound_arguments.args
+            prebuilt_kwargs = dict(prebound_arguments.kwargs)
+            return self._build_prebound_materialized_wrapper(
+                provider=provider,
+                prebuilt_args=prebuilt_args,
+                prebuilt_kwargs=prebuilt_kwargs,
+            )
+
         supports_fast_kwargs = all(
             dependency.parameter.kind
             in {
@@ -1821,6 +1851,76 @@ class Container:
             return provider(*bound_arguments.args, **bound_arguments.kwargs)
 
         return _bound_wrapper
+
+    def _build_prebound_materialized_wrapper(
+        self,
+        *,
+        provider: Any,
+        prebuilt_args: tuple[Any, ...],
+        prebuilt_kwargs: dict[str, Any],
+    ) -> Callable[[], Any]:
+        if prebuilt_kwargs:
+            if prebuilt_args:
+
+                def _zero_runtime_wrapper_args_kwargs() -> Any:
+                    return provider(*prebuilt_args, **prebuilt_kwargs)
+
+                return _zero_runtime_wrapper_args_kwargs
+
+            def _zero_runtime_wrapper_kwargs() -> Any:
+                return provider(**prebuilt_kwargs)
+
+            return _zero_runtime_wrapper_kwargs
+        if prebuilt_args:
+            one_argument = 1
+            two_arguments = 2
+            three_arguments = 3
+            four_arguments = 4
+
+            if len(prebuilt_args) == one_argument:
+                arg0 = prebuilt_args[0]
+
+                def _zero_runtime_wrapper_one_arg() -> Any:
+                    return provider(arg0)
+
+                return _zero_runtime_wrapper_one_arg
+            if len(prebuilt_args) == two_arguments:
+                arg0 = prebuilt_args[0]
+                arg1 = prebuilt_args[1]
+
+                def _zero_runtime_wrapper_two_args() -> Any:
+                    return provider(arg0, arg1)
+
+                return _zero_runtime_wrapper_two_args
+            if len(prebuilt_args) == three_arguments:
+                arg0 = prebuilt_args[0]
+                arg1 = prebuilt_args[1]
+                arg2 = prebuilt_args[2]
+
+                def _zero_runtime_wrapper_three_args() -> Any:
+                    return provider(arg0, arg1, arg2)
+
+                return _zero_runtime_wrapper_three_args
+            if len(prebuilt_args) == four_arguments:
+                arg0 = prebuilt_args[0]
+                arg1 = prebuilt_args[1]
+                arg2 = prebuilt_args[2]
+                arg3 = prebuilt_args[3]
+
+                def _zero_runtime_wrapper_four_args() -> Any:
+                    return provider(arg0, arg1, arg2, arg3)
+
+                return _zero_runtime_wrapper_four_args
+
+            def _zero_runtime_wrapper_var_args() -> Any:
+                return provider(*prebuilt_args)
+
+            return _zero_runtime_wrapper_var_args
+
+        def _zero_runtime_wrapper_no_args() -> Any:
+            return provider()
+
+        return _zero_runtime_wrapper_no_args
 
     def _resolve_factory_registration_dependencies(
         self,
