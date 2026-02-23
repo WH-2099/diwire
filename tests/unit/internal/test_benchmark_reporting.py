@@ -60,13 +60,6 @@ def _raw_payload() -> dict[str, object]:
                 "stats": {"ops": 300.0},
             },
             {
-                "name": "test_benchmark_punq_resolve_transient",
-                "fullname": (
-                    "tests/benchmarks/test_resolve_transient.py"
-                    "::test_benchmark_punq_resolve_transient"
-                ),
-                "stats": {"ops": 200.0},
-            },
             {
                 "name": "test_benchmark_diwire_resolve_singleton",
                 "fullname": (
@@ -98,22 +91,6 @@ def _raw_payload() -> dict[str, object]:
                     "::test_benchmark_wireup_resolve_singleton"
                 ),
                 "stats": {"ops": 625.0},
-            },
-            {
-                "name": "test_benchmark_punq_resolve_singleton",
-                "fullname": (
-                    "tests/benchmarks/test_resolve_singleton.py"
-                    "::test_benchmark_punq_resolve_singleton"
-                ),
-                "stats": {"ops": 250.0},
-            },
-            {
-                "name": "test_benchmark_punq_punq_only_scenario",
-                "fullname": (
-                    "tests/benchmarks/test_punq_only_scenario.py"
-                    "::test_benchmark_punq_punq_only_scenario"
-                ),
-                "stats": {"ops": 999.0},
             },
         ],
     }
@@ -173,28 +150,24 @@ def test_render_benchmark_markdown_renders_rows_and_metadata() -> None:
     assert "| resolve_transient | 500 | 400 | 250 | 300 | 1.25x | 2.00x | 1.67x |" in markdown
 
 
-def test_normalize_benchmark_report_can_include_optional_punq_results() -> None:
+def test_normalize_benchmark_report_can_use_explicit_library_filter() -> None:
     report = normalize_benchmark_report(
         _raw_payload(),
         source_raw_file="benchmark-results/raw-benchmark.json",
-        libraries=("diwire", "rodi", "dishka", "wireup", "punq"),
+        libraries=("diwire", "rodi", "dishka", "wireup"),
         scenarios=("resolve_transient", "resolve_singleton"),
     )
 
-    assert report.libraries == ("diwire", "rodi", "dishka", "wireup", "punq")
+    assert report.libraries == ("diwire", "rodi", "dishka", "wireup")
     assert report.scenarios == ("resolve_transient", "resolve_singleton")
-    assert report.ops["punq"]["resolve_transient"] == 200.0
-    assert report.ops["punq"]["resolve_singleton"] == 250.0
     assert report.ops["wireup"]["resolve_transient"] == 300.0
     assert report.ops["wireup"]["resolve_singleton"] == 625.0
-    assert report.speedups["punq"]["resolve_transient"] == 2.5
-    assert report.speedups["punq"]["resolve_singleton"] == 4.0
     assert report.speedups["wireup"]["resolve_transient"] == 500.0 / 300.0
     assert report.speedups["wireup"]["resolve_singleton"] == 1.6
     markdown = render_benchmark_markdown(report)
     assert (
-        "| Scenario | diwire | rodi | dishka | wireup | punq | speedup diwire/rodi "
-        "| speedup diwire/dishka | speedup diwire/wireup | speedup diwire/punq |" in markdown
+        "| Scenario | diwire | rodi | dishka | wireup | speedup diwire/rodi "
+        "| speedup diwire/dishka | speedup diwire/wireup |" in markdown
     )
 
 

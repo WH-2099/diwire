@@ -33,7 +33,17 @@ benchmark-diwire:
 	uv run pytest tests/benchmarks -k "benchmark_diwire" --benchmark-only --benchmark-columns=ops -q
 
 benchmark-comparison:
-	uv run pytest tests/benchmarks --benchmark-only --benchmark-columns=ops -q
+	uv run pytest tests/benchmarks/test_enter_close_scope_no_resolve.py --benchmark-only --benchmark-columns=ops -q
+	uv run pytest tests/benchmarks/test_enter_close_scope_resolve_once.py --benchmark-only --benchmark-columns=ops -q
+	uv run pytest tests/benchmarks/test_enter_close_scope_resolve_100_instance.py --benchmark-only --benchmark-columns=ops -q
+	uv run pytest tests/benchmarks/test_enter_close_scope_resolve_scoped_100.py --benchmark-only --benchmark-columns=ops -q
+	uv run pytest tests/benchmarks/test_resolve_deep_transient_chain.py --benchmark-only --benchmark-columns=ops -q
+	uv run pytest tests/benchmarks/test_resolve_wide_transient_graph.py --benchmark-only --benchmark-columns=ops -q
+	uv run pytest tests/benchmarks/test_resolve_singleton.py --benchmark-only --benchmark-columns=ops -q
+	uv run pytest tests/benchmarks/test_resolve_transient.py --benchmark-only --benchmark-columns=ops -q
+	uv run pytest tests/benchmarks/test_resolve_scoped.py --benchmark-only --benchmark-columns=ops -q
+	uv run pytest tests/benchmarks/test_resolve_mixed_lifetimes.py --benchmark-only --benchmark-columns=ops -q
+	uv run pytest tests/benchmarks/test_resolve_generated_scoped_grid.py --benchmark-only --benchmark-columns=ops -q
 
 benchmark-json:
 	mkdir -p benchmark-results
@@ -53,7 +63,7 @@ benchmark-report-all: benchmark-json
 		--markdown benchmark-results/benchmark-table-all.md \
 		--json benchmark-results/benchmark-table-all.json \
 		--comment benchmark-results/pr-comment-all.md \
-		--libraries diwire,rodi,dishka,wireup,punq
+		--libraries diwire,rodi,dishka,wireup
 
 benchmark-json-resolve:
 	mkdir -p benchmark-results
