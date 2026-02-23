@@ -338,6 +338,7 @@ class _OpenGenericResolver:  # pragma: no cover
     __slots__ = (
         "_async_base_dispatch",
         "_async_base_slot_indices",
+        "_async_base_slot_names",
         "_async_base_slot_resolvers",
         "_async_dispatch_cache",
         "_async_hot_base_dependency",
@@ -361,6 +362,7 @@ class _OpenGenericResolver:  # pragma: no cover
         "_scope_transition_cache",
         "_sync_base_dispatch",
         "_sync_base_slot_indices",
+        "_sync_base_slot_names",
         "_sync_base_slot_resolvers",
         "_sync_dispatch_cache",
         "_sync_hot_base_dependency",
@@ -417,6 +419,8 @@ class _OpenGenericResolver:  # pragma: no cover
             self._async_base_dispatch: set[Any] = set()
             self._sync_base_slot_indices: dict[Any, int] = {}
             self._async_base_slot_indices: dict[Any, int] = {}
+            self._sync_base_slot_names: dict[Any, str] = {}
+            self._async_base_slot_names: dict[Any, str] = {}
             self._sync_hot_base_dependency: Any = _MISSING_CACHE
             self._async_hot_base_dependency: Any = _MISSING_CACHE
             self._materialization_attempted_dependencies: set[Any] = set()
@@ -430,6 +434,8 @@ class _OpenGenericResolver:  # pragma: no cover
                 self._async_base_dispatch,
                 self._sync_base_slot_indices,
                 self._async_base_slot_indices,
+                self._sync_base_slot_names,
+                self._async_base_slot_names,
             ) = self._root_wrapper.shared_dispatch_state()
             self._materialization_attempted_dependencies = (
                 self._root_wrapper.materialization_attempted_dependencies()
@@ -448,14 +454,15 @@ class _OpenGenericResolver:  # pragma: no cover
         if dependency is self._sync_inline_dependency:
             return self._sync_inline_resolver()
 
-        if dependency is self._root_wrapper.sync_hot_base_dependency():
-            hot_slot_resolver = self._bind_known_sync_slot_resolver(
+        if (
+            self is not self._root_wrapper
+            and dependency is self._root_wrapper.sync_hot_base_dependency()
+        ):
+            hot_base_value = self._resolve_sync_hot_base_value(
                 dependency=dependency,
             )
-            if hot_slot_resolver is not None:
-                self._sync_inline_dependency = dependency
-                self._sync_inline_resolver = hot_slot_resolver
-                return hot_slot_resolver()
+            if hot_base_value is not _MISSING_CACHE:
+                return hot_base_value
 
         return self._resolve_sync_slow(dependency=dependency)
 
@@ -463,14 +470,15 @@ class _OpenGenericResolver:  # pragma: no cover
         if dependency is self._async_inline_dependency:
             return await self._async_inline_resolver()
 
-        if dependency is self._root_wrapper.async_hot_base_dependency():
-            hot_slot_resolver = self._bind_known_async_slot_resolver(
+        if (
+            self is not self._root_wrapper
+            and dependency is self._root_wrapper.async_hot_base_dependency()
+        ):
+            hot_base_value = await self._resolve_async_hot_base_value(
                 dependency=dependency,
             )
-            if hot_slot_resolver is not None:
-                self._async_inline_dependency = dependency
-                self._async_inline_resolver = hot_slot_resolver
-                return await hot_slot_resolver()
+            if hot_base_value is not _MISSING_CACHE:
+                return hot_base_value
 
         return await self._resolve_async_slow(dependency=dependency)
 
@@ -1279,6 +1287,8 @@ class _OpenGenericResolver:  # pragma: no cover
         set[Any],
         dict[Any, int],
         dict[Any, int],
+        dict[Any, str],
+        dict[Any, str],
     ]:
         return (
             self._managed_scopes,
@@ -1289,6 +1299,8 @@ class _OpenGenericResolver:  # pragma: no cover
             self._async_base_dispatch,
             self._sync_base_slot_indices,
             self._async_base_slot_indices,
+            self._sync_base_slot_names,
+            self._async_base_slot_names,
         )
 
     def cache_sync_base_resolver(self, *, dependency: Any) -> None:
@@ -1336,13 +1348,16 @@ class _OpenGenericResolver:  # pragma: no cover
         slot_index = self._resolve_base_slot_index(dependency=dependency)
         if slot_index is None:
             return None
+        slot_name = f"resolve_{slot_index}"
         self._sync_base_slot_indices[dependency] = slot_index
+        self._sync_base_slot_names[dependency] = slot_name
         slot_resolver = self._bind_base_slot_resolver(
             slot_index=slot_index,
             slot_prefix="resolve_",
         )
         if slot_resolver is None:
             self._sync_base_slot_indices.pop(dependency, None)
+            self._sync_base_slot_names.pop(dependency, None)
             return None
         typed_slot_resolver = cast("Callable[[], Any]", slot_resolver)
         self._sync_base_slot_resolvers[dependency] = typed_slot_resolver
@@ -1357,13 +1372,16 @@ class _OpenGenericResolver:  # pragma: no cover
         slot_index = self._resolve_base_slot_index(dependency=dependency)
         if slot_index is None:
             return None
+        slot_name = f"aresolve_{slot_index}"
         self._async_base_slot_indices[dependency] = slot_index
+        self._async_base_slot_names[dependency] = slot_name
         slot_resolver = self._bind_base_slot_resolver(
             slot_index=slot_index,
             slot_prefix="aresolve_",
         )
         if slot_resolver is None:
             self._async_base_slot_indices.pop(dependency, None)
+            self._async_base_slot_names.pop(dependency, None)
             return None
         typed_slot_resolver = cast("Callable[[], Awaitable[Any]]", slot_resolver)
         self._async_base_slot_resolvers[dependency] = typed_slot_resolver
@@ -1390,21 +1408,6 @@ class _OpenGenericResolver:  # pragma: no cover
         self._set_sync_hot_base_dependency(dependency=dependency)
         return typed_slot_resolver
 
-    def _bind_known_sync_slot_resolver(
-        self,
-        *,
-        dependency: Any,
-    ) -> Callable[[], Any] | None:
-        try:
-            slot_index = self._sync_base_slot_indices[dependency]
-            slot_resolver = cast(
-                "Callable[[], Any]", getattr(self._base_resolver, f"resolve_{slot_index}")
-            )
-        except (AttributeError, KeyError):
-            return None
-        self._sync_base_slot_resolvers[dependency] = slot_resolver
-        return slot_resolver
-
     def _resolve_async_slot_resolver_from_shared_index(
         self,
         *,
@@ -1425,21 +1428,39 @@ class _OpenGenericResolver:  # pragma: no cover
         self._set_async_hot_base_dependency(dependency=dependency)
         return typed_slot_resolver
 
-    def _bind_known_async_slot_resolver(
+    def _resolve_sync_hot_base_value(
         self,
         *,
         dependency: Any,
-    ) -> Callable[[], Awaitable[Any]] | None:
+    ) -> Any:
         try:
-            slot_index = self._async_base_slot_indices[dependency]
-            slot_resolver = cast(
-                "Callable[[], Awaitable[Any]]",
-                getattr(self._base_resolver, f"aresolve_{slot_index}"),
+            slot_name = self._sync_base_slot_names[dependency]
+            slot_function = cast(
+                "Callable[[Any], Any]",
+                getattr(type(self._base_resolver), slot_name),
             )
         except (AttributeError, KeyError):
-            return None
-        self._async_base_slot_resolvers[dependency] = slot_resolver
-        return slot_resolver
+            self._sync_base_slot_indices.pop(dependency, None)
+            self._sync_base_slot_names.pop(dependency, None)
+            return _MISSING_CACHE
+        return slot_function(self._base_resolver)
+
+    async def _resolve_async_hot_base_value(
+        self,
+        *,
+        dependency: Any,
+    ) -> Any:
+        try:
+            slot_name = self._async_base_slot_names[dependency]
+            slot_function = cast(
+                "Callable[[Any], Awaitable[Any]]",
+                getattr(type(self._base_resolver), slot_name),
+            )
+        except (AttributeError, KeyError):
+            self._async_base_slot_indices.pop(dependency, None)
+            self._async_base_slot_names.pop(dependency, None)
+            return _MISSING_CACHE
+        return await slot_function(self._base_resolver)
 
     def _set_sync_hot_base_dependency(self, *, dependency: Any) -> None:
         root_wrapper = self._root_wrapper
