@@ -355,6 +355,7 @@ class _OpenGenericResolver:  # pragma: no cover
         "_cleanup_enabled",
         "_has_async_specs",
         "_managed_scopes",
+        "_materialization_attempt_lock",
         "_materialization_attempted_dependencies",
         "_materialize_closed_callback",
         "_owned_scope_wrappers",
@@ -438,6 +439,7 @@ class _OpenGenericResolver:  # pragma: no cover
             self._async_hot_base_dependency: Any = _MISSING_CACHE
             self._sync_hot_slot_function: Callable[[Any], Any] | None = None
             self._async_hot_slot_function: Callable[[Any], Awaitable[Any]] | None = None
+            self._materialization_attempt_lock = threading.Lock()
             self._materialization_attempted_dependencies: set[Any] = set()
             self._refresh_shared_child_state()
         else:
@@ -461,6 +463,7 @@ class _OpenGenericResolver:  # pragma: no cover
                 scope_level,
                 {},
             )
+            self._materialization_attempt_lock = self._root_wrapper.materialization_attempt_lock()
             self._async_hot_base_dependency = _UNSET_CACHE
             self._async_hot_slot_function = None
             self._shared_child_state = shared_child_state
@@ -1337,10 +1340,12 @@ class _OpenGenericResolver:  # pragma: no cover
         callback = self._materialize_closed_callback
         if callback is None:
             return
-        attempted_dependencies = self._root_wrapper.materialization_attempted_dependencies()
-        if dependency in attempted_dependencies:
-            return
-        attempted_dependencies.add(dependency)
+        root_wrapper = self._root_wrapper
+        attempted_dependencies = root_wrapper.materialization_attempted_dependencies()
+        with root_wrapper.materialization_attempt_lock():
+            if dependency in attempted_dependencies:
+                return
+            attempted_dependencies.add(dependency)
         try:
             callback(dependency, match)
         except Exception as err:
@@ -1357,6 +1362,9 @@ class _OpenGenericResolver:  # pragma: no cover
 
     def materialization_attempted_dependencies(self) -> set[Any]:
         return self._materialization_attempted_dependencies
+
+    def materialization_attempt_lock(self) -> threading.Lock:
+        return self._materialization_attempt_lock
 
     def shared_dispatch_state(
         self,
