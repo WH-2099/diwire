@@ -313,6 +313,10 @@ class ResolversAssemblyCompiler:
             generated_globals[f"_provider_{workflow.slot}"] = runtime.provider_by_slot[
                 workflow.slot
             ]
+            if workflow.provider_attribute == "generator" and not workflow.is_provider_async:
+                generated_globals[f"_provider_sync_cm_{workflow.slot}"] = contextmanager(
+                    runtime.provider_by_slot[workflow.slot]
+                )
             generated_globals[f"_sync_slot_{workflow.slot}"] = _build_sync_slot_impl(
                 workflow=workflow,
             )
@@ -494,7 +498,7 @@ class ResolversAssemblyCompiler:
             if (not scope.is_root and scope.scope_level <= class_plan.scope_level)
         )
 
-        if class_plan.is_root and (runtime.uses_stateless_scope_reuse or not runtime.has_cleanup):
+        if class_plan.is_root:
             slots.extend(
                 f"_scope_resolver_{scope.scope_level}"
                 for scope in runtime.ordered_scopes
@@ -690,7 +694,7 @@ class ResolversAssemblyCompiler:
         for cache_slot in runtime.cache_slots_by_owner_level.get(class_plan.scope_level, ()):
             body_lines.append(f"self._cache_{cache_slot} = _MISSING_CACHE")
 
-        if class_plan.is_root and (runtime.uses_stateless_scope_reuse or not runtime.has_cleanup):
+        if class_plan.is_root:
             for non_root_scope in non_root_scopes:
                 body_lines.extend(
                     [
@@ -810,7 +814,7 @@ class ResolversAssemblyCompiler:
                     f"    return self._root_resolver._scope_resolver_{target_level}",
                 ],
             )
-        elif class_plan.is_root and not runtime.has_cleanup:
+        elif class_plan.is_root:
             pooled_lines = [
                 "if context is None and self._context is None and self._parent_context_resolver is None:",
                 f"    _pooled = self._scope_resolver_{target_level}",
@@ -819,6 +823,13 @@ class ResolversAssemblyCompiler:
                 "        _pooled._parent_context_resolver = self",
                 "        _pooled._owned_scope_resolvers = ()",
             ]
+            if runtime.has_cleanup:
+                pooled_lines.extend(
+                    [
+                        "        _pooled._cleanup_enabled = self._cleanup_enabled",
+                        "        _pooled._cleanup_callbacks.clear()",
+                    ],
+                )
             for cache_slot in runtime.cache_slots_by_owner_level.get(target_level, ()):
                 pooled_lines.append(f"        _pooled._cache_{cache_slot} = _MISSING_CACHE")
             pooled_lines.extend(
@@ -1471,9 +1482,6 @@ class ResolversAssemblyCompiler:
                 generated_globals=generated_globals,
             )
 
-        if workflow.provider_attribute not in {"instance", "concrete_type", "factory"}:
-            return None
-
         if workflow.is_cached:
             lines.extend(
                 [
@@ -1483,6 +1491,7 @@ class ResolversAssemblyCompiler:
                 ],
             )
 
+        arguments = ""
         value_expression: str
         if workflow.provider_attribute == "instance":
             value_expression = f"_provider_{workflow.slot}"
@@ -1498,6 +1507,51 @@ class ResolversAssemblyCompiler:
                 if arguments
                 else f"_provider_{workflow.slot}()"
             )
+
+        if workflow.provider_attribute == "generator":
+            if workflow.is_provider_async:
+                return None
+            if runtime.has_cleanup:
+                provider_cm_expression = (
+                    f"_provider_sync_cm_{workflow.slot}({arguments})"
+                    if arguments
+                    else f"_provider_sync_cm_{workflow.slot}()"
+                )
+                lines.extend(
+                    [
+                        "if self._cleanup_enabled:",
+                        f"    provider_cm = {provider_cm_expression}",
+                        "    value = provider_cm.__enter__()",
+                        "    self._cleanup_callbacks.append((0, provider_cm.__exit__))",
+                        "else:",
+                        f"    provider_gen = {value_expression}",
+                        "    value = next(provider_gen)",
+                    ],
+                )
+            else:
+                lines.extend(
+                    [
+                        f"provider_gen = {value_expression}",
+                        "value = next(provider_gen)",
+                    ],
+                )
+
+            if workflow.is_cached:
+                lines.append(f"self._cache_{workflow.slot} = value")
+                if workflow.cache_owner_scope_level == runtime.root_scope_level:
+                    lines.append(f"self.resolve_{workflow.slot} = lambda: value")
+
+            lines.append("return value")
+            return _compile_function_from_source(
+                name=method_name,
+                arg_names=("self",),
+                body_lines=lines,
+                generated_globals=generated_globals,
+            )
+
+        if workflow.provider_attribute not in {"instance", "concrete_type", "factory"}:
+            return None
+
         lines.append(f"value = {value_expression}")
 
         if workflow.is_provider_async:
@@ -1838,7 +1892,7 @@ def _resolver_init(
     for cache_slot in runtime.cache_slots_by_owner_level.get(class_plan.scope_level, ()):
         setattr(self, f"_cache_{cache_slot}", _MISSING_CACHE)
 
-    if class_plan.is_root and (runtime.uses_stateless_scope_reuse or not runtime.has_cleanup):
+    if class_plan.is_root:
         for scope in runtime.ordered_scopes:
             if scope.is_root:
                 continue
