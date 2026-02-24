@@ -4,6 +4,7 @@ import ast
 import hashlib
 import importlib.machinery
 import importlib.util
+import linecache
 import re
 import sys
 import traceback
@@ -136,6 +137,10 @@ def test_repo_readme_python_code_blocks_execute() -> None:
 
     module_name = _module_name_for_doc(README_PATH)
     module = _module_for_exec(module_name=module_name, doc_path=README_PATH)
+    readme_path_text = str(README_PATH)
+    script_lines = [f"{line}\n" for line in script.splitlines()]
+    previous_linecache_entry = linecache.cache.get(readme_path_text)
+    linecache.cache[readme_path_text] = (len(script), None, script_lines, readme_path_text)
 
     sys.modules[module_name] = module
     try:
@@ -151,3 +156,7 @@ def test_repo_readme_python_code_blocks_execute() -> None:
         raise AssertionError(msg) from exc
     finally:
         sys.modules.pop(module_name, None)
+        if previous_linecache_entry is None:
+            linecache.cache.pop(readme_path_text, None)
+        else:
+            linecache.cache[readme_path_text] = previous_linecache_entry
