@@ -204,6 +204,62 @@ def test_normalize_benchmark_report_allows_missing_optional_library_entries() ->
     assert "| resolve_transient | 500 | - | 250 | - | - | 2.00x | - |" in markdown
 
 
+def test_normalize_benchmark_report_keeps_scenarios_with_required_libraries_only() -> None:
+    payload = copy.deepcopy(_raw_payload())
+    benchmarks = payload["benchmarks"]
+    assert isinstance(benchmarks, list)
+    benchmarks.extend(
+        [
+            {
+                "name": (
+                    "test_benchmark_diwire_enter_close_scope_resolve_generator_request_try_finally"
+                ),
+                "fullname": (
+                    "tests/benchmarks/"
+                    "test_enter_close_scope_resolve_generator_request_try_finally.py"
+                    "::test_benchmark_diwire_enter_close_scope_resolve_generator_request_try_finally"
+                ),
+                "stats": {"ops": 200.0},
+            },
+            {
+                "name": (
+                    "test_benchmark_dishka_enter_close_scope_resolve_generator_request_try_finally"
+                ),
+                "fullname": (
+                    "tests/benchmarks/"
+                    "test_enter_close_scope_resolve_generator_request_try_finally.py"
+                    "::test_benchmark_dishka_enter_close_scope_resolve_generator_request_try_finally"
+                ),
+                "stats": {"ops": 100.0},
+            },
+        ],
+    )
+
+    report = normalize_benchmark_report(
+        payload,
+        source_raw_file="benchmark-results/raw-benchmark.json",
+    )
+
+    scenario = "enter_close_scope_resolve_generator_request_try_finally"
+    assert scenario in report.scenarios
+    assert report.files[scenario] == (
+        "tests/benchmarks/test_enter_close_scope_resolve_generator_request_try_finally.py"
+    )
+    assert report.ops["diwire"][scenario] == 200.0
+    assert report.ops["dishka"][scenario] == 100.0
+    assert report.ops["rodi"][scenario] is None
+    assert report.ops["wireup"][scenario] is None
+    assert report.speedups["dishka"][scenario] == 2.0
+    assert report.speedups["rodi"][scenario] is None
+    assert report.speedups["wireup"][scenario] is None
+
+    markdown = render_benchmark_markdown(report)
+    assert (
+        "| enter_close_scope_resolve_generator_request_try_finally | 200 | - | 100 | - | - | 2.00x |"
+        " - |" in markdown
+    )
+
+
 def test_normalize_benchmark_report_raises_for_missing_library_entry() -> None:
     payload = copy.deepcopy(_raw_payload())
     benchmarks = payload["benchmarks"]

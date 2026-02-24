@@ -3062,7 +3062,9 @@ class Container:
         """
         resolver = self._get_context_bound_resolver_or_none()
         if resolver is None:
-            resolver = self.compile()
+            resolver = self._root_resolver
+            if resolver is None:
+                resolver = self.compile()
         return resolver.enter_scope(scope, context=context)
 
     def __enter__(self) -> ResolverProtocol:
