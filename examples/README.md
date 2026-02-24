@@ -94,6 +94,7 @@ Files:
 - [04_add_generator_cleanup.py](#ex-02-registration-methods--04-add-generator-cleanup-py)
 - [05_add_context_manager_cleanup.py](#ex-02-registration-methods--05-add-context-manager-cleanup-py)
 - [06_explicit_dependencies.py](#ex-02-registration-methods--06-explicit-dependencies-py)
+- [07_add_generator_finally_validation.py](#ex-02-registration-methods--07-add-generator-finally-validation-py)
 
 <a id="ex-02-registration-methods--01-add-py"></a>
 ### [01_add.py](ex_02_registration_methods/01_add.py)
@@ -336,6 +337,62 @@ def main() -> None:
 
     resolved = container.resolve(ExplicitService)
     print(f"explicit_deps_ok={resolved.raw_dependency is raw}")  # => explicit_deps_ok=True
+
+
+if __name__ == "__main__":
+    main()
+```
+
+<a id="ex-02-registration-methods--07-add-generator-finally-validation-py"></a>
+### [07_add_generator_finally_validation.py](ex_02_registration_methods/07_add_generator_finally_validation.py)
+
+Focused example: ``add_generator`` finally validation and opt-out.
+
+```python
+from __future__ import annotations
+
+from collections.abc import Generator
+
+from diwire import Container, Lifetime, Scope
+from diwire.exceptions import DIWireInvalidRegistrationError
+
+
+class Resource:
+    pass
+
+
+def provide_without_finally() -> Generator[Resource, None, None]:
+    yield Resource()
+
+
+def main() -> None:
+    strict_container = Container()
+
+    try:
+        strict_container.add_generator(
+            provide_without_finally,
+            provides=Resource,
+            scope=Scope.REQUEST,
+            lifetime=Lifetime.SCOPED,
+        )
+    except DIWireInvalidRegistrationError as error:
+        print("default_validation_rejected=True")  # => default_validation_rejected=True
+        print(
+            f"opt_out_hint_present={'require_generator_finally=False' in str(error)}"
+        )  # => opt_out_hint_present=True
+
+    opt_out_container = Container()
+    opt_out_container.add_generator(
+        provide_without_finally,
+        provides=Resource,
+        scope=Scope.REQUEST,
+        lifetime=Lifetime.SCOPED,
+        require_generator_finally=False,
+    )
+
+    with opt_out_container.enter_scope() as request_scope:
+        resolved = request_scope.resolve(Resource)
+        print(f"opt_out_resolve_ok={isinstance(resolved, Resource)}")  # => opt_out_resolve_ok=True
 
 
 if __name__ == "__main__":

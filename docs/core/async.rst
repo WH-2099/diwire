@@ -14,8 +14,9 @@ Async factories
 Async cleanup
 -------------
 
-``add_generator()`` supports async generators (``async def ...: yield ...``). Cleanup in the ``finally`` block runs
-when the owning scope exits.
+``add_generator()`` supports async generators (``async def ...: yield ...``). Registrations are validated by default
+and must place ``yield`` in ``try/finally``. Cleanup in the ``finally`` block runs when the owning scope exits. Use
+``require_generator_finally=False`` on a specific registration to opt out when intentional.
 
 Runnable example: :doc:`/howto/examples/async`.
 
@@ -30,4 +31,3 @@ Concurrency note
 
 diwire does not automatically parallelize independent async dependencies. If you want concurrency (for example, multiple
 independent I/O calls), use ``asyncio.gather()`` in your application logic.
-

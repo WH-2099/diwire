@@ -146,7 +146,10 @@ def test_explicit_dependencies_for_concrete_type_are_validated() -> None:
 
 def test_explicit_dependencies_for_generator_are_validated() -> None:
     def build_service(dep: TypedDependency) -> Generator[Service, None, None]:
-        yield Service()
+        try:
+            yield Service()
+        finally:
+            pass
 
     signature = inspect.signature(build_service)
     dependencies = {

@@ -77,6 +77,10 @@ For deterministic cleanup, use:
 - :meth:`diwire.Container.add_generator` for generator/async-generator providers
 - :meth:`diwire.Container.add_context_manager` for (async) context manager providers
 
+``add_generator()`` validates registrations by default and requires every ``yield`` / ``yield from`` in the provider
+body to be inside a ``try`` block with a non-empty ``finally``. If you intentionally want to skip this validation for
+a specific registration, pass ``require_generator_finally=False``.
+
 See :doc:`/howto/examples/scopes` for a runnable cleanup example.
 
 Re-registering (overrides)

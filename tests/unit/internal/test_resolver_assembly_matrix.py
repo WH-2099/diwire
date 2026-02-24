@@ -218,7 +218,10 @@ def test_assembly_matrix_scope_mismatch_for_request_scoped_dependency_at_root() 
 @pytest.mark.asyncio
 async def test_assembly_matrix_async_dependency_chain_requires_aresolve() -> None:
     async def provide_dependency() -> AsyncGenerator[_MatrixAsyncDependency, None]:
-        yield _MatrixAsyncDependency()
+        try:
+            yield _MatrixAsyncDependency()
+        finally:
+            pass
 
     def build_consumer(dependency: _MatrixAsyncDependency) -> _MatrixService:
         service = _MatrixService()

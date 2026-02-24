@@ -146,6 +146,13 @@ def _context_manager() -> Generator[_Service, None, None]:
             "add_generator\\(\\) parameter 'dependency_registration_policy'",
         ),
         (
+            lambda container: container.add_generator(
+                _generator,
+                require_generator_finally=cast("Any", None),
+            ),
+            "add_generator\\(\\) parameter 'require_generator_finally'",
+        ),
+        (
             lambda container: container.add_context_manager(
                 cast("Any", None),
             ),
