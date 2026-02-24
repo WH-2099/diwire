@@ -46,6 +46,8 @@ benchmark-comparison:
 	uv run pytest tests/benchmarks/test_resolve_open_generic_transient.py --benchmark-only --benchmark-columns=ops -q
 	uv run pytest tests/benchmarks/test_resolve_scoped.py --benchmark-only --benchmark-columns=ops -q
 	uv run pytest tests/benchmarks/test_resolve_scoped_with_registered_open_closed_generics.py --benchmark-only --benchmark-columns=ops -q
+	uv run pytest tests/benchmarks/test_resolve_scoped_with_registered_open_closed_generics_pair_same.py --benchmark-only --benchmark-columns=ops -q
+	uv run pytest tests/benchmarks/test_resolve_scoped_with_registered_open_closed_generics_pair_alternating.py --benchmark-only --benchmark-columns=ops -q
 	uv run pytest tests/benchmarks/test_resolve_mixed_lifetimes.py --benchmark-only --benchmark-columns=ops -q
 	uv run pytest tests/benchmarks/test_resolve_generated_scoped_grid.py --benchmark-only --benchmark-columns=ops -q
 
@@ -78,6 +80,8 @@ benchmark-json-resolve:
 		tests/benchmarks/test_resolve_deep_transient_chain.py \
 		tests/benchmarks/test_resolve_wide_transient_graph.py \
 		tests/benchmarks/test_resolve_scoped_with_registered_open_closed_generics.py \
+		tests/benchmarks/test_resolve_scoped_with_registered_open_closed_generics_pair_same.py \
+		tests/benchmarks/test_resolve_scoped_with_registered_open_closed_generics_pair_alternating.py \
 		tests/benchmarks/test_resolve_generated_scoped_grid.py \
 		--benchmark-only -q --benchmark-json=benchmark-results/raw-benchmark-resolve.json
 

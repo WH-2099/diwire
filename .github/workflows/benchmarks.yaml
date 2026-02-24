@@ -32,8 +32,10 @@ jobs:
       - name: Install dependencies
         run: uv sync --group dev
 
-      - name: Run benchmark comparison report
-        run: make benchmark-report
+      - name: Run benchmark reports
+        run: |
+          make benchmark-report
+          make benchmark-report-resolve
 
       - name: Upload benchmark artifacts
         uses: actions/upload-artifact@v4
