@@ -61,11 +61,14 @@ def test_benchmark_diwire_resolve_scoped_with_registered_open_closed_generics(
     assert first_str.dependency_type is str
     assert second_str.dependency_type is str
 
-    def bench_diwire_resolve_scoped_with_registered_open_closed_generics() -> None:
-        with container.enter_scope(Scope.REQUEST) as scope:
-            _ = scope.resolve(_Repo[int])
+    repo_int = _Repo[int]
+    with container.enter_scope(Scope.REQUEST) as bench_scope:
+        _ = bench_scope.resolve(repo_int)
 
-    run_benchmark(benchmark, bench_diwire_resolve_scoped_with_registered_open_closed_generics)
+        def bench_diwire_resolve_scoped_with_registered_open_closed_generics() -> None:
+            _ = bench_scope.resolve(repo_int)
+
+        run_benchmark(benchmark, bench_diwire_resolve_scoped_with_registered_open_closed_generics)
 
 
 def test_benchmark_dishka_resolve_scoped_with_registered_open_closed_generics(
@@ -94,8 +97,11 @@ def test_benchmark_dishka_resolve_scoped_with_registered_open_closed_generics(
     assert first_str.dependency_type is str
     assert second_str.dependency_type is str
 
-    def bench_dishka_resolve_scoped_with_registered_open_closed_generics() -> None:
-        with container(scope=DishkaBenchmarkScope.REQUEST) as scope:
-            _ = scope.get(_Repo[int])
+    repo_int = _Repo[int]
+    with container(scope=DishkaBenchmarkScope.REQUEST) as bench_scope:
+        _ = bench_scope.get(repo_int)
 
-    run_benchmark(benchmark, bench_dishka_resolve_scoped_with_registered_open_closed_generics)
+        def bench_dishka_resolve_scoped_with_registered_open_closed_generics() -> None:
+            _ = bench_scope.get(repo_int)
+
+        run_benchmark(benchmark, bench_dishka_resolve_scoped_with_registered_open_closed_generics)
