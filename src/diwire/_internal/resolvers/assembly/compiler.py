@@ -2263,6 +2263,11 @@ def _execute_fast_single_cleanup_sync(*, self: Any, single_cleanup: Any) -> None
             cleanup_kind, cleanup = single_cleanup
             if cleanup_kind == _CLEANUP_KIND_SYNC:
                 cleanup(None, None, None)
+            elif cleanup_kind == _CLEANUP_KIND_SYNC_GENERATOR:
+                cleanup.close()
+            elif cleanup_kind == _CLEANUP_KIND_ASYNC:
+                msg = "Cannot execute async cleanup in sync context. Use 'async with'."
+                raise DIWireAsyncDependencyInSyncContextError(msg)
             else:
                 cleanup.close()
         else:

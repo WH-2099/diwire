@@ -3171,6 +3171,52 @@ def test_generated_exit_fast_path_clears_state_on_close_error() -> None:
     assert request_scope_any._active is False
 
 
+def test_execute_fast_single_cleanup_sync_raises_for_async_cleanup_kind() -> None:
+    async def _async_cleanup(*_args: object) -> None:
+        return None
+
+    resolver = SimpleNamespace(
+        _cleanup_callback_single=(compiler_module._CLEANUP_KIND_ASYNC, _async_cleanup),
+        _active=True,
+    )
+
+    with pytest.raises(
+        DIWireAsyncDependencyInSyncContextError,
+        match="Cannot execute async cleanup in sync context",
+    ):
+        compiler_module._execute_fast_single_cleanup_sync(
+            self=resolver,
+            single_cleanup=resolver._cleanup_callback_single,
+        )
+
+    assert resolver._cleanup_callback_single is None
+    assert resolver._active is False
+
+
+def test_execute_fast_single_cleanup_sync_tuple_unknown_kind_falls_back_to_close() -> None:
+    class _CloseTracker:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    cleanup = _CloseTracker()
+    resolver = SimpleNamespace(
+        _cleanup_callback_single=(99, cleanup),
+        _active=True,
+    )
+
+    compiler_module._execute_fast_single_cleanup_sync(
+        self=resolver,
+        single_cleanup=resolver._cleanup_callback_single,
+    )
+
+    assert cleanup.closed is True
+    assert resolver._cleanup_callback_single is None
+    assert resolver._active is False
+
+
 @pytest.mark.asyncio
 async def test_generator_cleanup_enabled_branches_raise_when_generator_does_not_yield() -> None:
     dependency = _dependency(name="value")
