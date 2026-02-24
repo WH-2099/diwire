@@ -2739,3 +2739,410 @@ def test_resolve_dependency_value_sync_async_provider_handle_branch() -> None:
 def test_resolver_scope_level_branch() -> None:
     resolver_type = type("ScopedResolver", (), {"_class_plan": SimpleNamespace(scope_level=9)})
     assert compiler_module._resolver_scope_level(resolver_type()) == 9
+
+
+def test_cleanup_sync_generator_successful_throw_branches() -> None:
+    class _GenStop:
+        def throw(
+            self,
+            _exc_type: type[BaseException] | None,
+            _exc_value: BaseException,
+            _traceback: object,
+        ) -> None:
+            raise StopIteration
+
+        def close(self) -> None:
+            return None
+
+    compiler_module._cleanup_sync_generator(
+        provider_gen=_GenStop(),
+        exc_type=ValueError,
+        exc_value=None,
+        traceback=None,
+    )
+
+    class _GenRuntimeSame:
+        def throw(
+            self,
+            _exc_type: type[BaseException] | None,
+            exc_value: BaseException,
+            _traceback: object,
+        ) -> None:
+            raise RuntimeError from exc_value
+
+        def close(self) -> None:
+            return None
+
+    compiler_module._cleanup_sync_generator(
+        provider_gen=_GenRuntimeSame(),
+        exc_type=StopIteration,
+        exc_value=StopIteration(),
+        traceback=None,
+    )
+
+    class _GenRuntimeIdentity:
+        def throw(
+            self,
+            _exc_type: type[BaseException] | None,
+            exc_value: BaseException,
+            _traceback: object,
+        ) -> None:
+            raise cast("RuntimeError", exc_value)
+
+        def close(self) -> None:
+            return None
+
+    runtime_exc = RuntimeError("same")
+    compiler_module._cleanup_sync_generator(
+        provider_gen=_GenRuntimeIdentity(),
+        exc_type=RuntimeError,
+        exc_value=runtime_exc,
+        traceback=None,
+    )
+
+    class _GenBaseIdentity:
+        def throw(
+            self,
+            _exc_type: type[BaseException] | None,
+            exc_value: BaseException,
+            _traceback: object,
+        ) -> None:
+            raise exc_value
+
+        def close(self) -> None:
+            return None
+
+    compiler_module._cleanup_sync_generator(
+        provider_gen=_GenBaseIdentity(),
+        exc_type=ValueError,
+        exc_value=ValueError("same"),
+        traceback=None,
+    )
+
+
+def test_cleanup_sync_generator_error_and_invalid_kind_branches() -> None:
+    class _GenBaseDifferent:
+        def throw(
+            self,
+            _exc_type: type[BaseException] | None,
+            _exc_value: BaseException,
+            _traceback: object,
+        ) -> None:
+            raise KeyError("different")
+
+        def close(self) -> None:
+            return None
+
+    with pytest.raises(KeyError, match="different"):
+        compiler_module._cleanup_sync_generator(
+            provider_gen=_GenBaseDifferent(),
+            exc_type=ValueError,
+            exc_value=ValueError("value"),
+            traceback=None,
+        )
+
+    class _GenRuntimeDifferent:
+        def throw(
+            self,
+            _exc_type: type[BaseException] | None,
+            _exc_value: BaseException,
+            _traceback: object,
+        ) -> None:
+            raise RuntimeError("boom")
+
+        def close(self) -> None:
+            return None
+
+    with pytest.raises(RuntimeError, match="boom"):
+        compiler_module._cleanup_sync_generator(
+            provider_gen=_GenRuntimeDifferent(),
+            exc_type=ValueError,
+            exc_value=ValueError("value"),
+            traceback=None,
+        )
+
+    class _GenNoStop:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def throw(
+            self,
+            _exc_type: type[BaseException] | None,
+            _exc_value: BaseException,
+            _traceback: object,
+        ) -> None:
+            return None
+
+        def close(self) -> None:
+            self.closed = True
+
+    non_stopping = _GenNoStop()
+    with pytest.raises(RuntimeError, match="generator didn't stop after throw"):
+        compiler_module._cleanup_sync_generator(
+            provider_gen=non_stopping,
+            exc_type=ValueError,
+            exc_value=ValueError("value"),
+            traceback=None,
+        )
+    assert non_stopping.closed is True
+
+    with pytest.raises(
+        DIWireAsyncDependencyInSyncContextError,
+        match="Cannot execute async cleanup in sync context",
+    ):
+        compiler_module._execute_sync_cleanup_callback(
+            cleanup_kind=99,
+            cleanup=lambda *_args: None,
+            exc_type=None,
+            exc_value=None,
+            traceback=None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_execute_async_cleanup_callback_generator_fallback_branch() -> None:
+    class _GenStop:
+        def throw(
+            self,
+            _exc_type: type[BaseException] | None,
+            _exc_value: BaseException,
+            _traceback: object,
+        ) -> None:
+            raise StopIteration
+
+        def close(self) -> None:
+            return None
+
+    await compiler_module._execute_async_cleanup_callback(
+        cleanup_kind=99,
+        cleanup=_GenStop(),
+        exc_type=ValueError,
+        exc_value=ValueError("value"),
+        traceback=None,
+    )
+
+
+def test_resolver_exit_single_cleanup_fast_and_conversion_branches() -> None:
+    sync_events: list[str] = []
+    tuple_resolver = SimpleNamespace(
+        _cleanup_callbacks=[],
+        _cleanup_callback_single=(0, lambda *_args: sync_events.append("tuple-sync")),
+        _owned_scope_resolvers=(),
+        _active=True,
+    )
+    compiler_module._resolver_exit(tuple_resolver, None, None, None)
+    assert sync_events == ["tuple-sync"]
+    assert tuple_resolver._cleanup_callback_single is None
+    assert tuple_resolver._active is False
+
+    class _GenClose:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    object_cleanup = _GenClose()
+    object_resolver = SimpleNamespace(
+        _cleanup_callbacks=[],
+        _cleanup_callback_single=object_cleanup,
+        _owned_scope_resolvers=(),
+        _active=True,
+    )
+    compiler_module._resolver_exit(object_resolver, None, None, None)
+    assert object_cleanup.closed is True
+    assert object_resolver._cleanup_callback_single is None
+    assert object_resolver._active is False
+
+    tuple_generator_cleanup = _GenClose()
+    tuple_generator_resolver = SimpleNamespace(
+        _cleanup_callbacks=[],
+        _cleanup_callback_single=(2, tuple_generator_cleanup),
+        _owned_scope_resolvers=(),
+        _active=True,
+    )
+    compiler_module._resolver_exit(tuple_generator_resolver, None, None, None)
+    assert tuple_generator_cleanup.closed is True
+
+    converted_cleanup = _GenClose()
+    converted_resolver = SimpleNamespace(
+        _cleanup_callbacks=[(0, lambda *_args: sync_events.append("list-sync"))],
+        _cleanup_callback_single=converted_cleanup,
+        _owned_scope_resolvers=(),
+        _active=True,
+    )
+    compiler_module._resolver_exit(converted_resolver, None, None, None)
+    assert converted_cleanup.closed is True
+    converted_tuple_cleanup = _GenClose()
+    converted_tuple_resolver = SimpleNamespace(
+        _cleanup_callbacks=[(0, lambda *_args: sync_events.append("tuple-list-sync"))],
+        _cleanup_callback_single=(2, converted_tuple_cleanup),
+        _owned_scope_resolvers=(),
+        _active=True,
+    )
+    compiler_module._resolver_exit(converted_tuple_resolver, None, None, None)
+    assert converted_tuple_cleanup.closed is True
+    assert sync_events == ["tuple-sync", "list-sync", "tuple-list-sync"]
+
+
+@pytest.mark.asyncio
+async def test_resolver_aexit_single_cleanup_and_conversion_branches() -> None:
+    async_events: list[str] = []
+
+    async def _async_cleanup(*_args: object) -> None:
+        async_events.append("tuple-async")
+
+    tuple_async_resolver = SimpleNamespace(
+        _cleanup_callbacks=[],
+        _cleanup_callback_single=(1, _async_cleanup),
+        _owned_scope_resolvers=(),
+        _active=True,
+    )
+    await compiler_module._resolver_aexit(tuple_async_resolver, None, None, None)
+    assert async_events == ["tuple-async"]
+    assert tuple_async_resolver._cleanup_callback_single is None
+    assert tuple_async_resolver._active is False
+
+    tuple_sync_resolver = SimpleNamespace(
+        _cleanup_callbacks=[],
+        _cleanup_callback_single=(0, lambda *_args: async_events.append("tuple-sync")),
+        _owned_scope_resolvers=(),
+        _active=True,
+    )
+    await compiler_module._resolver_aexit(tuple_sync_resolver, None, None, None)
+
+    class _GenClose:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    tuple_generator_cleanup = _GenClose()
+    tuple_generator_resolver = SimpleNamespace(
+        _cleanup_callbacks=[],
+        _cleanup_callback_single=(2, tuple_generator_cleanup),
+        _owned_scope_resolvers=(),
+        _active=True,
+    )
+    await compiler_module._resolver_aexit(tuple_generator_resolver, None, None, None)
+    assert tuple_generator_cleanup.closed is True
+
+    object_cleanup = _GenClose()
+    object_resolver = SimpleNamespace(
+        _cleanup_callbacks=[],
+        _cleanup_callback_single=object_cleanup,
+        _owned_scope_resolvers=(),
+        _active=True,
+    )
+    await compiler_module._resolver_aexit(object_resolver, None, None, None)
+    assert object_cleanup.closed is True
+    assert object_resolver._cleanup_callback_single is None
+    assert object_resolver._active is False
+
+    converted_cleanup = _GenClose()
+    converted_resolver = SimpleNamespace(
+        _cleanup_callbacks=[(0, lambda *_args: async_events.append("list-sync"))],
+        _cleanup_callback_single=converted_cleanup,
+        _owned_scope_resolvers=(),
+        _active=True,
+    )
+    await compiler_module._resolver_aexit(converted_resolver, None, None, None)
+    assert converted_cleanup.closed is True
+    converted_tuple_cleanup = _GenClose()
+    converted_tuple_resolver = SimpleNamespace(
+        _cleanup_callbacks=[(0, lambda *_args: async_events.append("tuple-list-sync"))],
+        _cleanup_callback_single=(2, converted_tuple_cleanup),
+        _owned_scope_resolvers=(),
+        _active=True,
+    )
+    await compiler_module._resolver_aexit(converted_tuple_resolver, None, None, None)
+    assert converted_tuple_cleanup.closed is True
+    assert async_events == ["tuple-async", "tuple-sync", "list-sync", "tuple-list-sync"]
+
+    one_sync_resolver = SimpleNamespace(
+        _cleanup_callbacks=[(0, lambda *_args: async_events.append("single-sync"))],
+        _cleanup_callback_single=None,
+        _owned_scope_resolvers=(),
+        _active=True,
+    )
+    await compiler_module._resolver_aexit(one_sync_resolver, None, None, None)
+
+    one_gen = _GenClose()
+    one_generator_resolver = SimpleNamespace(
+        _cleanup_callbacks=[(2, one_gen)],
+        _cleanup_callback_single=None,
+        _owned_scope_resolvers=(),
+        _active=True,
+    )
+    await compiler_module._resolver_aexit(one_generator_resolver, None, None, None)
+    assert one_gen.closed is True
+    assert async_events[-1] == "single-sync"
+
+
+@pytest.mark.asyncio
+async def test_generator_cleanup_enabled_branches_raise_when_generator_does_not_yield() -> None:
+    dependency = _dependency(name="value")
+    dependency_plan = ProviderDependencyPlan(
+        kind="literal",
+        dependency=dependency,
+        dependency_index=0,
+        literal_expression="None",
+    )
+
+    def _empty_generator(_value: Any = None) -> Any:
+        yield from ()
+
+    workflow_with_args = _workflow_plan(
+        slot=90,
+        provider_attribute="generator",
+        is_cached=False,
+        dependencies=(dependency,),
+        dependency_plans=(dependency_plan,),
+        dependency_slots=(None,),
+        dependency_requires_async=(False,),
+    )
+    runtime = _runtime(
+        scopes=(_scope_plan(level=1, name="app"),),
+        workflows=(workflow_with_args,),
+        provider_by_slot={90: _empty_generator},
+    )
+    scope_resolver = SimpleNamespace(_cleanup_callbacks=[])
+    resolver = SimpleNamespace(_cleanup_enabled=True)
+
+    with pytest.raises(RuntimeError, match="generator didn't yield"):
+        compiler_module._build_local_value_sync(
+            runtime=runtime,
+            resolver=resolver,
+            workflow=workflow_with_args,
+            provider_scope_resolver=scope_resolver,
+        )
+
+    with pytest.raises(RuntimeError, match="generator didn't yield"):
+        await compiler_module._build_local_value_async(
+            runtime=runtime,
+            resolver=resolver,
+            workflow=workflow_with_args,
+            provider_scope_resolver=scope_resolver,
+        )
+
+    workflow_no_args = _workflow_plan(
+        slot=91,
+        provider_attribute="generator",
+        is_cached=False,
+    )
+    with pytest.raises(RuntimeError, match="generator didn't yield"):
+        compiler_module._build_local_value_sync_no_arguments(
+            resolver=resolver,
+            workflow=workflow_no_args,
+            provider_scope_resolver=scope_resolver,
+            provider=_empty_generator,
+        )
+
+    with pytest.raises(RuntimeError, match="generator didn't yield"):
+        await compiler_module._build_local_value_async_no_arguments(
+            resolver=resolver,
+            workflow=workflow_no_args,
+            provider_scope_resolver=scope_resolver,
+            provider=_empty_generator,
+        )

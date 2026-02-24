@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# ruff: noqa: C901,FBT001,PERF203,PERF401,PLR0911,PLR0912,PLR0913,PLW0108,SLF001,TRY301
+# ruff: noqa: C901,FBT001,PERF203,PERF401,PLR0911,PLR0912,PLR0913,PLW0108,SLF001
 import ast
 import asyncio
 import inspect
@@ -9,7 +9,7 @@ import logging
 import threading
 import types
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from types import CodeType, TracebackType
 from typing import Any, Final, Literal, cast
@@ -55,6 +55,9 @@ _FALLBACK_ARGUMENT_EXPRESSION: Final[Any] = object()
 _OMIT_ARGUMENT: Final[Any] = object()
 _FILENAME: Final[str] = "<diwire-resolver>"
 _DISPATCH_CACHE_WORKFLOW_THRESHOLD: Final[int] = 4
+_CLEANUP_KIND_SYNC: Final[int] = 0
+_CLEANUP_KIND_ASYNC: Final[int] = 1
+_CLEANUP_KIND_SYNC_GENERATOR: Final[int] = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -313,10 +316,6 @@ class ResolversAssemblyCompiler:
             generated_globals[f"_provider_{workflow.slot}"] = runtime.provider_by_slot[
                 workflow.slot
             ]
-            if workflow.provider_attribute == "generator" and not workflow.is_provider_async:
-                generated_globals[f"_provider_sync_cm_{workflow.slot}"] = contextmanager(
-                    runtime.provider_by_slot[workflow.slot]
-                )
             generated_globals[f"_sync_slot_{workflow.slot}"] = _build_sync_slot_impl(
                 workflow=workflow,
             )
@@ -489,6 +488,8 @@ class ResolversAssemblyCompiler:
             slots.append("_cleanup_enabled")
         if runtime.has_cleanup:
             slots.append("_cleanup_callbacks")
+        if runtime.has_cleanup:
+            slots.append("_cleanup_callback_single")
         if class_plan.is_root:
             slots.append("__dict__")
 
@@ -654,6 +655,7 @@ class ResolversAssemblyCompiler:
             body_lines.append("self._cleanup_enabled = cleanup_enabled")
         if runtime.has_cleanup:
             body_lines.append("self._cleanup_callbacks = []")
+            body_lines.append("self._cleanup_callback_single = None")
 
         if class_plan.is_root:
             for non_root_scope in non_root_scopes:
@@ -827,7 +829,7 @@ class ResolversAssemblyCompiler:
                 pooled_lines.extend(
                     [
                         "        _pooled._cleanup_enabled = self._cleanup_enabled",
-                        "        _pooled._cleanup_callbacks.clear()",
+                        "        _pooled._cleanup_callback_single = None",
                     ],
                 )
             for cache_slot in runtime.cache_slots_by_owner_level.get(target_level, ()):
@@ -904,7 +906,10 @@ class ResolversAssemblyCompiler:
             plan=runtime.plan,
             class_plan=class_plan,
         )
-        enable_dispatch_cache = len(dispatch_workflows) >= _DISPATCH_CACHE_WORKFLOW_THRESHOLD
+        enable_dispatch_cache = _dispatch_cache_enabled_for_class(
+            plan=runtime.plan,
+            class_plan=class_plan,
+        )
         identity_workflows = tuple(
             workflow for workflow in dispatch_workflows if workflow.dispatch_kind == "identity"
         )
@@ -1199,8 +1204,27 @@ class ResolversAssemblyCompiler:
                 is_async=is_async,
                 name=name,
             )
+        if not is_async:
+            return _compile_function_from_source(
+                name=name,
+                arg_names=("self", "exc_type", "exc_value", "traceback"),
+                body_lines=[
+                    "if exc_type is None and not self._owned_scope_resolvers and not self._cleanup_callbacks:",
+                    "    single_cleanup = self._cleanup_callback_single",
+                    "    if single_cleanup is not None:",
+                    "        single_cleanup.close()",
+                    "        self._cleanup_callback_single = None",
+                    "        self._active = False",
+                    "        return None",
+                    "if self._cleanup_callback_single is not None:",
+                    "    self._cleanup_callbacks.append((2, self._cleanup_callback_single))",
+                    "    self._cleanup_callback_single = None",
+                    "return _resolver_exit(self, exc_type, exc_value, traceback)",
+                ],
+                generated_globals=generated_globals,
+            )
 
-        function_name = "_resolver_aexit" if is_async else "_resolver_exit"
+        function_name = "_resolver_aexit"
         arguments = ast.arguments(
             posonlyargs=[],
             args=[
@@ -1225,7 +1249,7 @@ class ResolversAssemblyCompiler:
             ],
             keywords=[],
         )
-        body = [ast.Return(value=ast.Await(value=call) if is_async else call)]
+        body = [ast.Return(value=ast.Await(value=call))]
         return _compile_function(
             name=name,
             arguments=arguments,
@@ -1512,17 +1536,24 @@ class ResolversAssemblyCompiler:
             if workflow.is_provider_async:
                 return None
             if runtime.has_cleanup:
-                provider_cm_expression = (
-                    f"_provider_sync_cm_{workflow.slot}({arguments})"
+                provider_gen_expression = (
+                    f"_provider_{workflow.slot}({arguments})"
                     if arguments
-                    else f"_provider_sync_cm_{workflow.slot}()"
+                    else f"_provider_{workflow.slot}()"
                 )
                 lines.extend(
                     [
                         "if self._cleanup_enabled:",
-                        f"    provider_cm = {provider_cm_expression}",
-                        "    value = provider_cm.__enter__()",
-                        "    self._cleanup_callbacks.append((0, provider_cm.__exit__))",
+                        f"    provider_gen = {provider_gen_expression}",
+                        "    try:",
+                        "        value = next(provider_gen)",
+                        "    except StopIteration as error:",
+                        '        msg = "generator didn\'t yield"',
+                        "        raise RuntimeError(msg) from error",
+                        "    if self._cleanup_callback_single is None and not self._cleanup_callbacks:",
+                        "        self._cleanup_callback_single = provider_gen",
+                        "    else:",
+                        "        self._cleanup_callbacks.append((2, provider_gen))",
                         "else:",
                         f"    provider_gen = {value_expression}",
                         "    value = next(provider_gen)",
@@ -1859,6 +1890,7 @@ def _resolver_init(
     if runtime.has_cleanup:
         self._cleanup_enabled = cleanup_enabled
         self._cleanup_callbacks = []
+        self._cleanup_callback_single = None
     self._owned_scope_resolvers = ()
 
     for scope in runtime.ordered_scopes:
@@ -2136,28 +2168,154 @@ def _resolver_is_registered_dependency(self: Any, dependency: Any) -> bool:
     return normalized_dependency in runtime.dep_registered_keys
 
 
+def _cleanup_sync_generator(
+    *,
+    provider_gen: Any,
+    exc_type: type[BaseException] | None,
+    exc_value: BaseException | None,
+    traceback: TracebackType | None,
+) -> None:
+    if exc_type is None:
+        provider_gen.close()
+        return
+
+    received_exc = exc_value if exc_value is not None else exc_type()
+    try:
+        provider_gen.throw(exc_type, received_exc, traceback)
+    except StopIteration:
+        return
+    except RuntimeError as error:
+        if error is received_exc:
+            return
+        if (
+            isinstance(received_exc, (StopIteration, StopAsyncIteration))
+            and error.__cause__ is received_exc
+        ):
+            return
+        raise
+    except BaseException as error:
+        if error is not received_exc:
+            raise
+        return
+
+    provider_gen.close()
+    msg = "generator didn't stop after throw()"
+    raise RuntimeError(msg)
+
+
+def _execute_sync_cleanup_callback(
+    *,
+    cleanup_kind: int,
+    cleanup: Any,
+    exc_type: type[BaseException] | None,
+    exc_value: BaseException | None,
+    traceback: TracebackType | None,
+) -> None:
+    if cleanup_kind == _CLEANUP_KIND_SYNC:
+        cleanup(exc_type, exc_value, traceback)
+        return
+
+    if cleanup_kind == _CLEANUP_KIND_SYNC_GENERATOR:
+        _cleanup_sync_generator(
+            provider_gen=cleanup,
+            exc_type=exc_type,
+            exc_value=exc_value,
+            traceback=traceback,
+        )
+        return
+
+    msg = "Cannot execute async cleanup in sync context. Use 'async with'."
+    raise DIWireAsyncDependencyInSyncContextError(msg)
+
+
+async def _execute_async_cleanup_callback(
+    *,
+    cleanup_kind: int,
+    cleanup: Any,
+    exc_type: type[BaseException] | None,
+    exc_value: BaseException | None,
+    traceback: TracebackType | None,
+) -> None:
+    if cleanup_kind == _CLEANUP_KIND_SYNC:
+        cleanup(exc_type, exc_value, traceback)
+        return
+
+    if cleanup_kind == _CLEANUP_KIND_ASYNC:
+        await cleanup(exc_type, exc_value, traceback)
+        return
+
+    _cleanup_sync_generator(
+        provider_gen=cleanup,
+        exc_type=exc_type,
+        exc_value=exc_value,
+        traceback=traceback,
+    )
+
+
 def _resolver_exit(
     self: Any,
     exc_type: type[BaseException] | None,
     exc_value: BaseException | None,
     traceback: TracebackType | None,
 ) -> None:
-    cleanup_error: BaseException | None = None
+    cleanup_callbacks = self._cleanup_callbacks
+    single_cleanup = getattr(self, "_cleanup_callback_single", None)
+    owned_scope_resolvers = self._owned_scope_resolvers
 
-    while self._cleanup_callbacks:
-        cleanup_kind, cleanup = self._cleanup_callbacks.pop()
-        try:
-            if cleanup_kind == 0:
-                cleanup(exc_type, exc_value, traceback)
+    if (
+        exc_type is None
+        and not owned_scope_resolvers
+        and single_cleanup is not None
+        and not cleanup_callbacks
+    ):
+        if isinstance(single_cleanup, tuple):
+            cleanup_kind, cleanup = single_cleanup
+            if cleanup_kind == _CLEANUP_KIND_SYNC:
+                cleanup(None, None, None)
             else:
-                msg = "Cannot execute async cleanup in sync context. Use 'async with'."
-                raise DIWireAsyncDependencyInSyncContextError(msg)
+                cleanup.close()
+        else:
+            single_cleanup.close()
+        self._cleanup_callback_single = None
+        self._active = False
+        return
+
+    if single_cleanup is not None:
+        if isinstance(single_cleanup, tuple):
+            cleanup_callbacks.append(single_cleanup)
+        else:
+            cleanup_callbacks.append((_CLEANUP_KIND_SYNC_GENERATOR, single_cleanup))
+        self._cleanup_callback_single = None
+
+    cleanup_error: BaseException | None = None
+    if exc_type is None and not owned_scope_resolvers and len(cleanup_callbacks) == 1:
+        cleanup_kind, cleanup = cleanup_callbacks.pop()
+        if cleanup_kind == _CLEANUP_KIND_SYNC:
+            cleanup(None, None, None)
+        elif cleanup_kind == _CLEANUP_KIND_SYNC_GENERATOR:
+            cleanup.close()
+        else:
+            msg = "Cannot execute async cleanup in sync context. Use 'async with'."
+            raise DIWireAsyncDependencyInSyncContextError(msg)
+        self._active = False
+        return
+
+    while cleanup_callbacks:
+        cleanup_kind, cleanup = cleanup_callbacks.pop()
+        try:
+            _execute_sync_cleanup_callback(
+                cleanup_kind=cleanup_kind,
+                cleanup=cleanup,
+                exc_type=exc_type,
+                exc_value=exc_value,
+                traceback=traceback,
+            )
         except BaseException as error:  # noqa: BLE001
             if exc_type is None and cleanup_error is None:
                 cleanup_error = error
 
-    if self._owned_scope_resolvers:
-        for owned_scope_resolver in reversed(self._owned_scope_resolvers):
+    if owned_scope_resolvers:
+        for owned_scope_resolver in reversed(owned_scope_resolvers):
             try:
                 owned_scope_resolver.__exit__(exc_type, exc_value, traceback)
             except BaseException as error:  # noqa: BLE001
@@ -2176,21 +2334,65 @@ def _resolver_aexit(
     traceback: TracebackType | None,
 ) -> Awaitable[None]:
     async def _run() -> None:
-        cleanup_error: BaseException | None = None
+        cleanup_callbacks = self._cleanup_callbacks
+        single_cleanup = getattr(self, "_cleanup_callback_single", None)
+        owned_scope_resolvers = self._owned_scope_resolvers
 
-        while self._cleanup_callbacks:
-            cleanup_kind, cleanup = self._cleanup_callbacks.pop()
-            try:
-                if cleanup_kind == 0:
-                    cleanup(exc_type, exc_value, traceback)
+        if (
+            exc_type is None
+            and not owned_scope_resolvers
+            and single_cleanup is not None
+            and not cleanup_callbacks
+        ):
+            if isinstance(single_cleanup, tuple):
+                cleanup_kind, cleanup = single_cleanup
+                if cleanup_kind == _CLEANUP_KIND_SYNC:
+                    cleanup(None, None, None)
+                elif cleanup_kind == _CLEANUP_KIND_ASYNC:
+                    await cleanup(None, None, None)
                 else:
-                    await cleanup(exc_type, exc_value, traceback)
+                    cleanup.close()
+            else:
+                single_cleanup.close()
+            self._cleanup_callback_single = None
+            self._active = False
+            return
+
+        if single_cleanup is not None:
+            if isinstance(single_cleanup, tuple):
+                cleanup_callbacks.append(single_cleanup)
+            else:
+                cleanup_callbacks.append((_CLEANUP_KIND_SYNC_GENERATOR, single_cleanup))
+            self._cleanup_callback_single = None
+
+        cleanup_error: BaseException | None = None
+        if exc_type is None and not owned_scope_resolvers and len(cleanup_callbacks) == 1:
+            cleanup_kind, cleanup = cleanup_callbacks.pop()
+            if cleanup_kind == _CLEANUP_KIND_SYNC:
+                cleanup(None, None, None)
+            elif cleanup_kind == _CLEANUP_KIND_ASYNC:
+                await cleanup(None, None, None)
+            else:
+                cleanup.close()
+            self._active = False
+            return
+
+        while cleanup_callbacks:
+            cleanup_kind, cleanup = cleanup_callbacks.pop()
+            try:
+                await _execute_async_cleanup_callback(
+                    cleanup_kind=cleanup_kind,
+                    cleanup=cleanup,
+                    exc_type=exc_type,
+                    exc_value=exc_value,
+                    traceback=traceback,
+                )
             except BaseException as error:  # noqa: BLE001
                 if exc_type is None and cleanup_error is None:
                     cleanup_error = error
 
-        if self._owned_scope_resolvers:
-            for owned_scope_resolver in reversed(self._owned_scope_resolvers):
+        if owned_scope_resolvers:
+            for owned_scope_resolver in reversed(owned_scope_resolvers):
                 try:
                     await owned_scope_resolver.__aexit__(exc_type, exc_value, traceback)
                 except BaseException as error:  # noqa: BLE001
@@ -2586,12 +2788,15 @@ def _build_local_value_sync(
             _raise_scope_mismatch(workflow=workflow)
 
         if resolver._cleanup_enabled:
-            provider_cm = _call_provider(
-                callable_obj=contextmanager(provider),
-                argument_parts=argument_parts,
+            provider_gen = _call_provider(callable_obj=provider, argument_parts=argument_parts)
+            try:
+                value = next(provider_gen)
+            except StopIteration as error:
+                msg = "generator didn't yield"
+                raise RuntimeError(msg) from error
+            provider_scope_resolver._cleanup_callbacks.append(
+                (_CLEANUP_KIND_SYNC_GENERATOR, provider_gen)
             )
-            value = provider_cm.__enter__()
-            provider_scope_resolver._cleanup_callbacks.append((0, provider_cm.__exit__))
             return value
 
         provider_gen = _call_provider(callable_obj=provider, argument_parts=argument_parts)
@@ -2673,12 +2878,15 @@ def _build_local_value_async(
                 return await anext(provider_gen)
 
             if resolver._cleanup_enabled:
-                provider_cm = _call_provider(
-                    callable_obj=contextmanager(provider),
-                    argument_parts=argument_parts,
+                provider_gen = _call_provider(callable_obj=provider, argument_parts=argument_parts)
+                try:
+                    value = next(provider_gen)
+                except StopIteration as error:
+                    msg = "generator didn't yield"
+                    raise RuntimeError(msg) from error
+                provider_scope_resolver._cleanup_callbacks.append(
+                    (_CLEANUP_KIND_SYNC_GENERATOR, provider_gen)
                 )
-                value = provider_cm.__enter__()
-                provider_scope_resolver._cleanup_callbacks.append((0, provider_cm.__exit__))
                 return value
 
             provider_gen = _call_provider(callable_obj=provider, argument_parts=argument_parts)
@@ -2734,9 +2942,15 @@ def _build_local_value_sync_no_arguments(
             _raise_scope_mismatch(workflow=workflow)
 
         if resolver._cleanup_enabled:
-            provider_cm = contextmanager(provider)()
-            value = provider_cm.__enter__()
-            provider_scope_resolver._cleanup_callbacks.append((0, provider_cm.__exit__))
+            provider_gen = provider()
+            try:
+                value = next(provider_gen)
+            except StopIteration as error:
+                msg = "generator didn't yield"
+                raise RuntimeError(msg) from error
+            provider_scope_resolver._cleanup_callbacks.append(
+                (_CLEANUP_KIND_SYNC_GENERATOR, provider_gen)
+            )
             return value
 
         provider_gen = provider()
@@ -2791,9 +3005,15 @@ def _build_local_value_async_no_arguments(
                 return await anext(provider_async_gen)
 
             if resolver._cleanup_enabled:
-                provider_sync_cm = contextmanager(provider)()
-                value = provider_sync_cm.__enter__()
-                provider_scope_resolver._cleanup_callbacks.append((0, provider_sync_cm.__exit__))
+                provider_sync_gen = provider()
+                try:
+                    value = next(provider_sync_gen)
+                except StopIteration as error:
+                    msg = "generator didn't yield"
+                    raise RuntimeError(msg) from error
+                provider_scope_resolver._cleanup_callbacks.append(
+                    (_CLEANUP_KIND_SYNC_GENERATOR, provider_sync_gen)
+                )
                 return value
 
             provider_sync_gen = provider()
@@ -3361,9 +3581,9 @@ def _dispatch_cache_enabled_for_class(
     plan: ResolverGenerationPlan,
     class_plan: ScopePlan,
 ) -> bool:
-    return (
-        len(_dispatch_workflows(plan=plan, class_plan=class_plan))
-        >= _DISPATCH_CACHE_WORKFLOW_THRESHOLD
+    workflow_count = len(_dispatch_workflows(plan=plan, class_plan=class_plan))
+    return workflow_count >= _DISPATCH_CACHE_WORKFLOW_THRESHOLD or (
+        not class_plan.is_root and workflow_count == 1
     )
 
 
