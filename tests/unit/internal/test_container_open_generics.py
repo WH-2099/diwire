@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import inspect
 import threading
-import time
 import typing
 from collections.abc import AsyncGenerator, Generator
 from concurrent.futures import ThreadPoolExecutor
@@ -687,16 +686,17 @@ def test_runtime_materialization_serializes_provider_registration_add_calls(
     active_add_calls = 0
     observed_overlap = False
     active_add_calls_lock = threading.Lock()
+    start_event = threading.Event()
     original_add = container._providers_registrations.add
 
     def _tracked_add(spec: Any) -> None:
         nonlocal active_add_calls, observed_overlap
+        start_event.wait(timeout=5)
         with active_add_calls_lock:
             active_add_calls += 1
             if active_add_calls > 1:
                 observed_overlap = True
         try:
-            time.sleep(0.001)
             original_add(spec)
         finally:
             with active_add_calls_lock:
@@ -710,7 +710,10 @@ def test_runtime_materialization_serializes_provider_registration_add_calls(
         return container.resolve(_IBox[dependency])
 
     with ThreadPoolExecutor(max_workers=16) as executor:
-        list(executor.map(_resolve_dependency, dependencies))
+        futures = [executor.submit(_resolve_dependency, dependency) for dependency in dependencies]
+        start_event.set()
+        for future in futures:
+            future.result()
 
     assert observed_overlap is False
     for dependency in dependencies:
