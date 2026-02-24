@@ -3,6 +3,7 @@ from __future__ import annotations
 import functools
 import inspect
 import logging
+import threading
 from collections.abc import AsyncGenerator, Awaitable, Callable, Generator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
@@ -198,6 +199,7 @@ class Container:
         self._decoration_counter: int = 0
         self._injected_scope_contracts: list[_InjectedScopeContract] = []
         self._runtime_materialized_closed_keys: set[Any] = set()
+        self._graph_state_lock: Any = threading.RLock()
         self._container_entrypoints: dict[str, Callable[..., Any]] = {
             method_name: getattr(self, method_name) for method_name in self._ENTRYPOINT_METHOD_NAMES
         }
@@ -1676,109 +1678,110 @@ class Container:
         dependency: Any,
         match: Any,
     ) -> None:
-        if self._providers_registrations.find_by_type(dependency) is not None:
-            return
+        with self._graph_state_lock:
+            if self._providers_registrations.find_by_type(dependency) is not None:
+                return
 
-        open_spec = match.spec
-        typevar_map = match.typevar_map
+            open_spec = match.spec
+            typevar_map = match.typevar_map
 
-        specialized_dependencies: list[ProviderDependency] = []
-        injected_dependencies: list[ProviderDependency] = []
-        injected_arguments: dict[str, Any] = {}
-        for binding in open_spec.bindings:
-            if binding.kind == "dependency":
-                resolved_dependency = substitute_typevars(binding.template, mapping=typevar_map)
-                if contains_typevar(resolved_dependency):
+            specialized_dependencies: list[ProviderDependency] = []
+            injected_dependencies: list[ProviderDependency] = []
+            injected_arguments: dict[str, Any] = {}
+            for binding in open_spec.bindings:
+                if binding.kind == "dependency":
+                    resolved_dependency = substitute_typevars(binding.template, mapping=typevar_map)
+                    if contains_typevar(resolved_dependency):
+                        return
+                    specialized_dependencies.append(
+                        ProviderDependency(
+                            provides=resolved_dependency,
+                            parameter=binding.dependency.parameter,
+                        ),
+                    )
+                    continue
+
+                typevar = binding.typevar
+                if typevar is None:
                     return
-                specialized_dependencies.append(
-                    ProviderDependency(
-                        provides=resolved_dependency,
-                        parameter=binding.dependency.parameter,
-                    ),
+                argument_value = typevar_map.get(typevar, _MISSING_CLOSED_GENERIC_INJECTION)
+                if argument_value is _MISSING_CLOSED_GENERIC_INJECTION:
+                    return
+                injected_dependencies.append(binding.dependency)
+                injected_arguments[binding.dependency.parameter.name] = argument_value
+
+            provider_kind = cast("str", open_spec.provider_kind)
+            provider_object = open_spec.provider
+            if injected_dependencies:
+                provider_object = self._build_materialized_provider_wrapper(
+                    provider=provider_object,
+                    injected_dependencies=tuple(injected_dependencies),
+                    injected_arguments=injected_arguments,
+                    has_runtime_dependencies=bool(specialized_dependencies),
+                    provider_is_inject_wrapper=open_spec.provider_is_inject_wrapper,
                 )
-                continue
+                if open_spec.provider_is_inject_wrapper:
+                    provider_object.__dict__[INJECT_WRAPPER_MARKER] = True
+                if provider_kind == "concrete_type":
+                    provider_kind = "factory"
 
-            typevar = binding.typevar
-            if typevar is None:
-                return
-            argument_value = typevar_map.get(typevar, _MISSING_CLOSED_GENERIC_INJECTION)
-            if argument_value is _MISSING_CLOSED_GENERIC_INJECTION:
-                return
-            injected_dependencies.append(binding.dependency)
-            injected_arguments[binding.dependency.parameter.name] = argument_value
-
-        provider_kind = cast("str", open_spec.provider_kind)
-        provider_object = open_spec.provider
-        if injected_dependencies:
-            provider_object = self._build_materialized_provider_wrapper(
-                provider=provider_object,
-                injected_dependencies=tuple(injected_dependencies),
-                injected_arguments=injected_arguments,
-                has_runtime_dependencies=bool(specialized_dependencies),
-                provider_is_inject_wrapper=open_spec.provider_is_inject_wrapper,
-            )
-            if open_spec.provider_is_inject_wrapper:
-                provider_object.__dict__[INJECT_WRAPPER_MARKER] = True
             if provider_kind == "concrete_type":
-                provider_kind = "factory"
+                provider_spec = ProviderSpec(
+                    provides=dependency,
+                    concrete_type=cast("type[Any]", provider_object),
+                    lifetime=open_spec.lifetime,
+                    scope=open_spec.scope,
+                    dependencies=specialized_dependencies,
+                    is_async=open_spec.is_async,
+                    is_any_dependency_async=open_spec.is_any_dependency_async,
+                    needs_cleanup=open_spec.needs_cleanup,
+                    lock_mode=open_spec.lock_mode,
+                )
+            elif provider_kind == "factory":
+                provider_spec = ProviderSpec(
+                    provides=dependency,
+                    factory=cast("FactoryProvider[Any]", provider_object),
+                    lifetime=open_spec.lifetime,
+                    scope=open_spec.scope,
+                    dependencies=specialized_dependencies,
+                    is_async=open_spec.is_async,
+                    is_any_dependency_async=open_spec.is_any_dependency_async,
+                    needs_cleanup=open_spec.needs_cleanup,
+                    lock_mode=open_spec.lock_mode,
+                )
+            elif provider_kind == "generator":
+                provider_spec = ProviderSpec(
+                    provides=dependency,
+                    generator=cast("GeneratorProvider[Any]", provider_object),
+                    lifetime=open_spec.lifetime,
+                    scope=open_spec.scope,
+                    dependencies=specialized_dependencies,
+                    is_async=open_spec.is_async,
+                    is_any_dependency_async=open_spec.is_any_dependency_async,
+                    needs_cleanup=open_spec.needs_cleanup,
+                    lock_mode=open_spec.lock_mode,
+                )
+            else:
+                provider_spec = ProviderSpec(
+                    provides=dependency,
+                    context_manager=cast("ContextManagerProvider[Any]", provider_object),
+                    lifetime=open_spec.lifetime,
+                    scope=open_spec.scope,
+                    dependencies=specialized_dependencies,
+                    is_async=open_spec.is_async,
+                    is_any_dependency_async=open_spec.is_any_dependency_async,
+                    needs_cleanup=open_spec.needs_cleanup,
+                    lock_mode=open_spec.lock_mode,
+                )
 
-        if provider_kind == "concrete_type":
-            provider_spec = ProviderSpec(
-                provides=dependency,
-                concrete_type=cast("type[Any]", provider_object),
-                lifetime=open_spec.lifetime,
-                scope=open_spec.scope,
-                dependencies=specialized_dependencies,
-                is_async=open_spec.is_async,
-                is_any_dependency_async=open_spec.is_any_dependency_async,
-                needs_cleanup=open_spec.needs_cleanup,
-                lock_mode=open_spec.lock_mode,
+            self._providers_registrations.add(provider_spec)
+            self._runtime_materialized_closed_keys.add(dependency)
+            should_invalidate_compilation = (
+                provider_spec.lifetime is Lifetime.TRANSIENT
+                or provider_spec.scope.level > self._root_scope.level
             )
-        elif provider_kind == "factory":
-            provider_spec = ProviderSpec(
-                provides=dependency,
-                factory=cast("FactoryProvider[Any]", provider_object),
-                lifetime=open_spec.lifetime,
-                scope=open_spec.scope,
-                dependencies=specialized_dependencies,
-                is_async=open_spec.is_async,
-                is_any_dependency_async=open_spec.is_any_dependency_async,
-                needs_cleanup=open_spec.needs_cleanup,
-                lock_mode=open_spec.lock_mode,
-            )
-        elif provider_kind == "generator":
-            provider_spec = ProviderSpec(
-                provides=dependency,
-                generator=cast("GeneratorProvider[Any]", provider_object),
-                lifetime=open_spec.lifetime,
-                scope=open_spec.scope,
-                dependencies=specialized_dependencies,
-                is_async=open_spec.is_async,
-                is_any_dependency_async=open_spec.is_any_dependency_async,
-                needs_cleanup=open_spec.needs_cleanup,
-                lock_mode=open_spec.lock_mode,
-            )
-        else:
-            provider_spec = ProviderSpec(
-                provides=dependency,
-                context_manager=cast("ContextManagerProvider[Any]", provider_object),
-                lifetime=open_spec.lifetime,
-                scope=open_spec.scope,
-                dependencies=specialized_dependencies,
-                is_async=open_spec.is_async,
-                is_any_dependency_async=open_spec.is_any_dependency_async,
-                needs_cleanup=open_spec.needs_cleanup,
-                lock_mode=open_spec.lock_mode,
-            )
-
-        self._providers_registrations.add(provider_spec)
-        self._runtime_materialized_closed_keys.add(dependency)
-        should_invalidate_compilation = (
-            provider_spec.lifetime is Lifetime.TRANSIENT
-            or provider_spec.scope.level > self._root_scope.level
-        )
-        if should_invalidate_compilation:
-            self._invalidate_compilation()
+            if should_invalidate_compilation:
+                self._invalidate_compilation()
 
     def _build_materialized_provider_wrapper(
         self,
@@ -2694,33 +2697,34 @@ class Container:
                 service = container.resolve(Service)
 
         """
-        if self._root_resolver is None:
-            root_resolver = self._resolvers_manager.build_root_resolver(
-                root_scope=self._root_scope,
-                registrations=self._providers_registrations,
-            )
-            if self._open_generic_registry.has_specs():
-                has_async_specs = any(
-                    spec.is_async for spec in self._providers_registrations.values()
-                ) or any(spec.is_async for spec in self._open_generic_registry.values())
-                root_resolver = cast(
-                    "ResolverProtocol",
-                    OpenGenericResolver(
-                        base_resolver=root_resolver,
-                        registry=self._open_generic_registry,
-                        root_scope=self._root_scope,
-                        has_async_specs=has_async_specs,
-                        scope_level=self._root_scope.level,
-                        materialize_closed_callback=self._materialize_closed_open_generic_spec,
-                    ),
+        with self._graph_state_lock:
+            if self._root_resolver is None:
+                root_resolver = self._resolvers_manager.build_root_resolver(
+                    root_scope=self._root_scope,
+                    registrations=self._providers_registrations,
                 )
-            if self._use_resolver_context:
-                root_resolver = self._resolver_context._wrap_resolver(root_resolver)  # noqa: SLF001
-            self._root_resolver = root_resolver
-        if self._missing_policy is MissingPolicy.ERROR and not self._use_resolver_context:
-            self._bind_container_entrypoints(target=self._root_resolver)
+                if self._open_generic_registry.has_specs():
+                    has_async_specs = any(
+                        spec.is_async for spec in self._providers_registrations.values()
+                    ) or any(spec.is_async for spec in self._open_generic_registry.values())
+                    root_resolver = cast(
+                        "ResolverProtocol",
+                        OpenGenericResolver(
+                            base_resolver=root_resolver,
+                            registry=self._open_generic_registry,
+                            root_scope=self._root_scope,
+                            has_async_specs=has_async_specs,
+                            scope_level=self._root_scope.level,
+                            materialize_closed_callback=self._materialize_closed_open_generic_spec,
+                        ),
+                    )
+                if self._use_resolver_context:
+                    root_resolver = self._resolver_context._wrap_resolver(root_resolver)  # noqa: SLF001
+                self._root_resolver = root_resolver
+            if self._missing_policy is MissingPolicy.ERROR and not self._use_resolver_context:
+                self._bind_container_entrypoints(target=self._root_resolver)
 
-        return self._root_resolver
+            return self._root_resolver
 
     def _invalidate_compilation(self) -> None:
         """Discard compiled resolver state and restore original container methods.
@@ -2728,9 +2732,10 @@ class Container:
         Any registration mutation can change the resolver graph, so cached compiled
         entrypoints must be reverted back to container methods until recompilation.
         """
-        self._graph_revision += 1
-        self._root_resolver = None
-        self._restore_container_entrypoints()
+        with self._graph_state_lock:
+            self._graph_revision += 1
+            self._root_resolver = None
+            self._restore_container_entrypoints()
 
     def _revalidate_injected_scope_contracts(self) -> None:
         for contract in self._injected_scope_contracts:
@@ -2746,56 +2751,59 @@ class Container:
 
     @contextmanager
     def _registration_mutation(self) -> Generator[None, None, None]:
-        if self._registration_mutation_depth == 0:
-            self._purge_runtime_materialized_closed_specs()
-            self._registration_mutation_snapshot = _ContainerGraphSnapshot(
-                providers_registrations=self._providers_registrations.snapshot(),
-                open_generic_registry=self._open_generic_registry.snapshot(),
-                decoration_rules_by_provides={
-                    provides: list(rules)
-                    for provides, rules in self._decoration_rules_by_provides.items()
-                },
-                decoration_chain_by_provides={
-                    provides: _DecorationChain(
-                        base_key=chain.base_key,
-                        layer_keys=list(chain.layer_keys),
-                    )
-                    for provides, chain in self._decoration_chain_by_provides.items()
-                },
-                decoration_counter=self._decoration_counter,
-            )
-            self._registration_mutation_failed = False
-
-        self._registration_mutation_depth += 1
-        try:
-            yield
-            if self._registration_mutation_depth == 1:
-                self._revalidate_injected_scope_contracts()
-        except DIWireInvalidRegistrationError:
-            self._registration_mutation_failed = True
-            raise
-        finally:
-            self._registration_mutation_depth -= 1
+        with self._graph_state_lock:
             if self._registration_mutation_depth == 0:
-                if self._registration_mutation_failed:
-                    snapshot = cast("_ContainerGraphSnapshot", self._registration_mutation_snapshot)
-                    self._providers_registrations.restore(snapshot.providers_registrations)
-                    self._open_generic_registry.restore(snapshot.open_generic_registry)
-                    self._decoration_rules_by_provides = {
+                self._purge_runtime_materialized_closed_specs()
+                self._registration_mutation_snapshot = _ContainerGraphSnapshot(
+                    providers_registrations=self._providers_registrations.snapshot(),
+                    open_generic_registry=self._open_generic_registry.snapshot(),
+                    decoration_rules_by_provides={
                         provides: list(rules)
-                        for provides, rules in snapshot.decoration_rules_by_provides.items()
-                    }
-                    self._decoration_chain_by_provides = {
+                        for provides, rules in self._decoration_rules_by_provides.items()
+                    },
+                    decoration_chain_by_provides={
                         provides: _DecorationChain(
                             base_key=chain.base_key,
                             layer_keys=list(chain.layer_keys),
                         )
-                        for provides, chain in snapshot.decoration_chain_by_provides.items()
-                    }
-                    self._decoration_counter = snapshot.decoration_counter
-                    self._invalidate_compilation()
-                self._registration_mutation_snapshot = None
+                        for provides, chain in self._decoration_chain_by_provides.items()
+                    },
+                    decoration_counter=self._decoration_counter,
+                )
                 self._registration_mutation_failed = False
+
+            self._registration_mutation_depth += 1
+            try:
+                yield
+                if self._registration_mutation_depth == 1:
+                    self._revalidate_injected_scope_contracts()
+            except DIWireInvalidRegistrationError:
+                self._registration_mutation_failed = True
+                raise
+            finally:
+                self._registration_mutation_depth -= 1
+                if self._registration_mutation_depth == 0:
+                    if self._registration_mutation_failed:
+                        snapshot = cast(
+                            "_ContainerGraphSnapshot", self._registration_mutation_snapshot
+                        )
+                        self._providers_registrations.restore(snapshot.providers_registrations)
+                        self._open_generic_registry.restore(snapshot.open_generic_registry)
+                        self._decoration_rules_by_provides = {
+                            provides: list(rules)
+                            for provides, rules in snapshot.decoration_rules_by_provides.items()
+                        }
+                        self._decoration_chain_by_provides = {
+                            provides: _DecorationChain(
+                                base_key=chain.base_key,
+                                layer_keys=list(chain.layer_keys),
+                            )
+                            for provides, chain in snapshot.decoration_chain_by_provides.items()
+                        }
+                        self._decoration_counter = snapshot.decoration_counter
+                        self._invalidate_compilation()
+                    self._registration_mutation_snapshot = None
+                    self._registration_mutation_failed = False
 
     def _purge_runtime_materialized_closed_specs(self) -> None:
         if not self._runtime_materialized_closed_keys:

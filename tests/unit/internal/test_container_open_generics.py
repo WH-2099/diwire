@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import inspect
+import threading
+import time
 import typing
 from collections.abc import AsyncGenerator, Generator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -667,3 +670,91 @@ def test_closed_generic_injection_helpers_cover_non_injected_dependency_paths() 
         )
         is not int
     )
+
+
+def test_runtime_materialization_serializes_provider_registration_add_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = Container()
+    container.add_factory(
+        _create_box,
+        provides=_IBox,
+        lifetime=Lifetime.TRANSIENT,
+        scope=Scope.APP,
+    )
+    container.compile()
+
+    active_add_calls = 0
+    observed_overlap = False
+    active_add_calls_lock = threading.Lock()
+    original_add = container._providers_registrations.add
+
+    def _tracked_add(spec: Any) -> None:
+        nonlocal active_add_calls, observed_overlap
+        with active_add_calls_lock:
+            active_add_calls += 1
+            if active_add_calls > 1:
+                observed_overlap = True
+        try:
+            time.sleep(0.001)
+            original_add(spec)
+        finally:
+            with active_add_calls_lock:
+                active_add_calls -= 1
+
+    monkeypatch.setattr(container._providers_registrations, "add", _tracked_add)
+
+    dependencies = [type(f"_ConcurrentType{index}", (), {}) for index in range(32)]
+
+    def _resolve_dependency(dependency: type[Any]) -> Any:
+        return container.resolve(_IBox[dependency])
+
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        list(executor.map(_resolve_dependency, dependencies))
+
+    assert observed_overlap is False
+    for dependency in dependencies:
+        assert container._providers_registrations.find_by_type(_IBox[dependency]) is not None
+
+
+def test_compile_is_safe_during_concurrent_runtime_materialization() -> None:
+    container = Container()
+    container.add_factory(
+        _create_box,
+        provides=_IBox,
+        lifetime=Lifetime.TRANSIENT,
+        scope=Scope.APP,
+    )
+    container.compile()
+
+    failures: list[BaseException] = []
+    failures_lock = threading.Lock()
+    dependencies = [type(f"_CompileRaceType{index}", (), {}) for index in range(48)]
+
+    def _record_failure(error: BaseException) -> None:
+        with failures_lock:
+            failures.append(error)
+
+    def _resolve_dependency(dependency: type[Any]) -> None:
+        try:
+            container.resolve(_IBox[dependency])
+        except BaseException as error:
+            _record_failure(error)
+
+    def _compile_many_times() -> None:
+        try:
+            for _ in range(200):
+                container.compile()
+        except BaseException as error:
+            _record_failure(error)
+
+    with ThreadPoolExecutor(max_workers=20) as executor:
+        compile_future = executor.submit(_compile_many_times)
+        resolve_futures = [
+            executor.submit(_resolve_dependency, dependency) for dependency in dependencies
+        ]
+        compile_future.result()
+        for resolve_future in resolve_futures:
+            resolve_future.result()
+
+    assert failures == []

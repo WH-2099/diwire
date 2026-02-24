@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import builtins
 import inspect
+import threading
 import typing
+from concurrent.futures import ThreadPoolExecutor
 from types import TracebackType
 from typing import Annotated, Any, Generic, TypeVar, cast
 
@@ -501,3 +503,101 @@ async def test_open_generic_resolver_async_dispatch_cache_reuses_match() -> None
     second = await resolver.aresolve(_Generic[int])
 
     assert first is not second
+
+
+def test_open_generic_resolver_thread_lock_first_touch_is_singleton_under_concurrency() -> None:
+    resolver = open_generics.OpenGenericResolver(
+        base_resolver=cast("Any", _MissingResolver()),
+        registry=open_generics.OpenGenericRegistry(),
+        root_scope=Scope.APP,
+        has_async_specs=False,
+        scope_level=Scope.APP.level,
+    )
+    dependency = _Generic[int]
+    barrier = threading.Barrier(24)
+
+    def _resolve_thread_lock() -> Any:
+        barrier.wait()
+        return resolver.get_thread_lock(dependency)
+
+    with ThreadPoolExecutor(max_workers=24) as executor:
+        futures = [executor.submit(_resolve_thread_lock) for _ in range(24)]
+        locks = [future.result() for future in futures]
+
+    assert len({id(lock) for lock in locks}) == 1
+
+
+def test_open_generic_resolver_cache_first_touch_preserves_concurrent_writes() -> None:
+    resolver = open_generics.OpenGenericResolver(
+        base_resolver=cast("Any", _MissingResolver()),
+        registry=open_generics.OpenGenericRegistry(),
+        root_scope=Scope.APP,
+        has_async_specs=False,
+        scope_level=Scope.APP.level,
+    )
+    dependencies = [f"dep-{index}" for index in range(48)]
+    barrier = threading.Barrier(len(dependencies))
+
+    def _cache_dependency(dependency: str) -> None:
+        barrier.wait()
+        resolver.set_cached(dependency=dependency, value=dependency)
+
+    with ThreadPoolExecutor(max_workers=len(dependencies)) as executor:
+        list(executor.map(_cache_dependency, dependencies))
+
+    for dependency in dependencies:
+        assert resolver.get_cached(dependency) == dependency
+
+
+def test_open_generic_resolver_materialization_callback_runs_once_under_concurrency() -> None:
+    registry = open_generics.OpenGenericRegistry()
+    registry.register(
+        provides=_Generic[T],
+        provider_kind="factory",
+        provider=_factory,
+        lifetime=Lifetime.TRANSIENT,
+        scope=Scope.APP,
+        lock_mode=LockMode.NONE,
+        is_async=False,
+        is_any_dependency_async=False,
+        needs_cleanup=False,
+        dependencies=[],
+    )
+
+    callback_calls = 0
+    callback_lock = threading.Lock()
+    callback_entered = threading.Event()
+    callback_release = threading.Event()
+
+    def _materialize_callback(dependency: Any, match: Any) -> None:
+        nonlocal callback_calls
+        _ = dependency
+        _ = match
+        with callback_lock:
+            callback_calls += 1
+        callback_entered.set()
+        callback_release.wait(timeout=5)
+
+    resolver = open_generics.OpenGenericResolver(
+        base_resolver=cast("Any", _MissingResolver()),
+        registry=registry,
+        root_scope=Scope.APP,
+        has_async_specs=False,
+        scope_level=Scope.APP.level,
+        materialize_closed_callback=_materialize_callback,
+    )
+    dependency = _Generic[int]
+    barrier = threading.Barrier(16)
+
+    def _resolve_dependency() -> Any:
+        barrier.wait()
+        return resolver.resolve(dependency)
+
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        futures = [executor.submit(_resolve_dependency) for _ in range(16)]
+        assert callback_entered.wait(timeout=5)
+        callback_release.set()
+        resolved_values = [future.result() for future in futures]
+
+    assert callback_calls == 1
+    assert len(resolved_values) == 16

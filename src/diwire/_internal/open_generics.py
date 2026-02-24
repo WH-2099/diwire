@@ -354,6 +354,7 @@ class _OpenGenericResolver:  # pragma: no cover
         "_cleanup_callbacks",
         "_cleanup_enabled",
         "_has_async_specs",
+        "_local_state_lock",
         "_managed_scopes",
         "_materialization_attempt_lock",
         "_materialization_attempted_dependencies",
@@ -369,6 +370,7 @@ class _OpenGenericResolver:  # pragma: no cover
         "_scope_transition_hot_path",
         "_scope_transition_hot_target",
         "_shared_child_state",
+        "_shared_state_lock",
         "_sync_base_dispatch",
         "_sync_base_slot_functions",
         "_sync_base_slot_indices",
@@ -400,6 +402,7 @@ class _OpenGenericResolver:  # pragma: no cover
         self._scope_level = scope_level
         self._root_wrapper = self if root_wrapper is None else root_wrapper
         self._parent_wrapper = parent_wrapper
+        self._local_state_lock: Any = threading.RLock()
         self._cache: dict[Any, Any] | None = None
         self._thread_locks: dict[Any, threading.Lock] | None = None
         self._async_locks: dict[Any, asyncio.Lock] | None = None
@@ -439,6 +442,7 @@ class _OpenGenericResolver:  # pragma: no cover
             self._async_hot_base_dependency: Any = _MISSING_CACHE
             self._sync_hot_slot_function: Callable[[Any], Any] | None = None
             self._async_hot_slot_function: Callable[[Any], Awaitable[Any]] | None = None
+            self._shared_state_lock = threading.RLock()
             self._materialization_attempt_lock = threading.Lock()
             self._materialization_attempted_dependencies: set[Any] = set()
             self._refresh_shared_child_state()
@@ -463,10 +467,20 @@ class _OpenGenericResolver:  # pragma: no cover
                 scope_level,
                 {},
             )
+            self._shared_state_lock = self._root_wrapper.shared_state_lock()
             self._materialization_attempt_lock = self._root_wrapper.materialization_attempt_lock()
             self._async_hot_base_dependency = _UNSET_CACHE
             self._async_hot_slot_function = None
             self._shared_child_state = shared_child_state
+        self._init_runtime_resolver_state(
+            materialize_closed_callback=materialize_closed_callback,
+        )
+
+    def _init_runtime_resolver_state(
+        self,
+        *,
+        materialize_closed_callback: Callable[[Any, _OpenGenericMatch], None] | None,
+    ) -> None:
         self._scope_transition_hot_target: Any = _MISSING_CACHE
         self._scope_transition_hot_path: tuple[BaseScope, ...] = ()
         self._sync_base_slot_resolvers: dict[Any, Callable[[], Any]] | None = None
@@ -477,7 +491,9 @@ class _OpenGenericResolver:  # pragma: no cover
         self._async_inline_resolver: Callable[[], Awaitable[Any]] = (
             self._missing_async_inline_resolver
         )
-        self._materialize_closed_callback = materialize_closed_callback
+        self._materialize_closed_callback: Callable[[Any, _OpenGenericMatch], None] | None = (
+            materialize_closed_callback
+        )
 
     def shared_child_init_state(
         self,
@@ -1000,22 +1016,31 @@ class _OpenGenericResolver:  # pragma: no cover
     def set_cached(self, *, dependency: Any, value: Any) -> None:
         cache = self._cache
         if cache is None:
-            cache = {}
-            self._cache = cache
+            with self._local_state_lock:
+                cache = self._cache
+                if cache is None:
+                    cache = {}
+                    self._cache = cache
         cache[dependency] = value
 
     def get_thread_lock(self, dependency: Any) -> threading.Lock:
         thread_locks = self._thread_locks
         if thread_locks is None:
-            thread_locks = {}
-            self._thread_locks = thread_locks
+            with self._local_state_lock:
+                thread_locks = self._thread_locks
+                if thread_locks is None:
+                    thread_locks = {}
+                    self._thread_locks = thread_locks
         return thread_locks.setdefault(dependency, threading.Lock())
 
     def get_async_lock(self, dependency: Any) -> asyncio.Lock:
         async_locks = self._async_locks
         if async_locks is None:
-            async_locks = {}
-            self._async_locks = async_locks
+            with self._local_state_lock:
+                async_locks = self._async_locks
+                if async_locks is None:
+                    async_locks = {}
+                    self._async_locks = async_locks
         return async_locks.setdefault(dependency, asyncio.Lock())
 
     def build_open_value_sync(self, *, match: _OpenGenericMatch) -> Any:
@@ -1298,14 +1323,15 @@ class _OpenGenericResolver:  # pragma: no cover
         normalized_dependency: Any,
         dispatch_entry: _OpenGenericDispatchEntry,
     ) -> None:
-        for cache in (self._sync_dispatch_cache, self._async_dispatch_cache):
-            cache[dependency] = dispatch_entry
-            cache[dispatch_entry.dependency] = dispatch_entry
-            if (
-                normalized_dependency is not dependency
-                and dispatch_entry.dependency is normalized_dependency
-            ):
-                cache[normalized_dependency] = dispatch_entry
+        with self._shared_state_lock:
+            for cache in (self._sync_dispatch_cache, self._async_dispatch_cache):
+                cache[dependency] = dispatch_entry
+                cache[dispatch_entry.dependency] = dispatch_entry
+                if (
+                    normalized_dependency is not dependency
+                    and dispatch_entry.dependency is normalized_dependency
+                ):
+                    cache[normalized_dependency] = dispatch_entry
 
     def _find_and_cache_open_dispatch_entry(
         self,
@@ -1366,6 +1392,9 @@ class _OpenGenericResolver:  # pragma: no cover
     def materialization_attempt_lock(self) -> threading.Lock:
         return self._materialization_attempt_lock
 
+    def shared_state_lock(self) -> Any:
+        return self._shared_state_lock
+
     def shared_dispatch_state(
         self,
     ) -> tuple[
@@ -1394,16 +1423,22 @@ class _OpenGenericResolver:  # pragma: no cover
         )
 
     def cache_sync_base_resolver(self, *, dependency: Any) -> None:
-        sync_slot_resolver = self._resolve_sync_slot_resolver_from_runtime(dependency=dependency)
-        if sync_slot_resolver is not None:
-            return
-        self._sync_base_dispatch.add(dependency)
+        with self._shared_state_lock:
+            sync_slot_resolver = self._resolve_sync_slot_resolver_from_runtime(
+                dependency=dependency
+            )
+            if sync_slot_resolver is not None:
+                return
+            self._sync_base_dispatch.add(dependency)
 
     def cache_async_base_resolver(self, *, dependency: Any) -> None:
-        async_slot_resolver = self._resolve_async_slot_resolver_from_runtime(dependency=dependency)
-        if async_slot_resolver is not None:
-            return
-        self._async_base_dispatch.add(dependency)
+        with self._shared_state_lock:
+            async_slot_resolver = self._resolve_async_slot_resolver_from_runtime(
+                dependency=dependency
+            )
+            if async_slot_resolver is not None:
+                return
+            self._async_base_dispatch.add(dependency)
 
     def _resolve_base_slot_index(
         self,
@@ -1446,144 +1481,148 @@ class _OpenGenericResolver:  # pragma: no cover
         *,
         dependency: Any,
     ) -> Callable[[], Any] | None:
-        slot_index = self._resolve_base_slot_index(dependency=dependency)
-        if slot_index is None:
-            return None
-        slot_function = self._resolve_base_slot_function(
-            slot_index=slot_index,
-            slot_prefix="resolve_",
-        )
-        if slot_function is None:
-            return None
-        typed_slot_function = cast("Callable[[Any], Any]", slot_function)
-        self._sync_base_slot_functions[dependency] = typed_slot_function
-        self._sync_base_slot_indices[dependency] = slot_index
-        slot_resolver = self._bind_base_slot_resolver(
-            slot_index=slot_index,
-            slot_prefix="resolve_",
-        )
-        if slot_resolver is None:
-            self._sync_base_slot_indices.pop(dependency, None)
-            self._sync_base_slot_functions.pop(dependency, None)
-            return None
-        typed_slot_resolver = cast("Callable[[], Any]", slot_resolver)
-        slot_resolvers = self._sync_base_slot_resolvers
-        if slot_resolvers is None:
-            slot_resolvers = {}
-            self._sync_base_slot_resolvers = slot_resolvers
-        slot_resolvers[dependency] = typed_slot_resolver
-        self._set_sync_hot_base_dependency(dependency=dependency)
-        return typed_slot_resolver
+        with self._shared_state_lock:
+            slot_index = self._resolve_base_slot_index(dependency=dependency)
+            if slot_index is None:
+                return None
+            slot_function = self._resolve_base_slot_function(
+                slot_index=slot_index,
+                slot_prefix="resolve_",
+            )
+            if slot_function is None:
+                return None
+            typed_slot_function = cast("Callable[[Any], Any]", slot_function)
+            self._sync_base_slot_functions[dependency] = typed_slot_function
+            self._sync_base_slot_indices[dependency] = slot_index
+            slot_resolver = self._bind_base_slot_resolver(
+                slot_index=slot_index,
+                slot_prefix="resolve_",
+            )
+            if slot_resolver is None:
+                self._sync_base_slot_indices.pop(dependency, None)
+                self._sync_base_slot_functions.pop(dependency, None)
+                return None
+            typed_slot_resolver = cast("Callable[[], Any]", slot_resolver)
+            slot_resolvers = self._sync_base_slot_resolvers
+            if slot_resolvers is None:
+                slot_resolvers = {}
+                self._sync_base_slot_resolvers = slot_resolvers
+            slot_resolvers[dependency] = typed_slot_resolver
+            self._set_sync_hot_base_dependency(dependency=dependency)
+            return typed_slot_resolver
 
     def _resolve_async_slot_resolver_from_runtime(
         self,
         *,
         dependency: Any,
     ) -> Callable[[], Awaitable[Any]] | None:
-        slot_index = self._resolve_base_slot_index(dependency=dependency)
-        if slot_index is None:
-            return None
-        slot_function = self._resolve_base_slot_function(
-            slot_index=slot_index,
-            slot_prefix="aresolve_",
-        )
-        if slot_function is None:
-            return None
-        typed_slot_function = cast("Callable[[Any], Awaitable[Any]]", slot_function)
-        self._async_base_slot_functions[dependency] = typed_slot_function
-        self._async_base_slot_indices[dependency] = slot_index
-        slot_resolver = self._bind_base_slot_resolver(
-            slot_index=slot_index,
-            slot_prefix="aresolve_",
-        )
-        if slot_resolver is None:
-            self._async_base_slot_indices.pop(dependency, None)
-            self._async_base_slot_functions.pop(dependency, None)
-            return None
-        typed_slot_resolver = cast("Callable[[], Awaitable[Any]]", slot_resolver)
-        slot_resolvers = self._async_base_slot_resolvers
-        if slot_resolvers is None:
-            slot_resolvers = {}
-            self._async_base_slot_resolvers = slot_resolvers
-        slot_resolvers[dependency] = typed_slot_resolver
-        self._set_async_hot_base_dependency(dependency=dependency)
-        return typed_slot_resolver
+        with self._shared_state_lock:
+            slot_index = self._resolve_base_slot_index(dependency=dependency)
+            if slot_index is None:
+                return None
+            slot_function = self._resolve_base_slot_function(
+                slot_index=slot_index,
+                slot_prefix="aresolve_",
+            )
+            if slot_function is None:
+                return None
+            typed_slot_function = cast("Callable[[Any], Awaitable[Any]]", slot_function)
+            self._async_base_slot_functions[dependency] = typed_slot_function
+            self._async_base_slot_indices[dependency] = slot_index
+            slot_resolver = self._bind_base_slot_resolver(
+                slot_index=slot_index,
+                slot_prefix="aresolve_",
+            )
+            if slot_resolver is None:
+                self._async_base_slot_indices.pop(dependency, None)
+                self._async_base_slot_functions.pop(dependency, None)
+                return None
+            typed_slot_resolver = cast("Callable[[], Awaitable[Any]]", slot_resolver)
+            slot_resolvers = self._async_base_slot_resolvers
+            if slot_resolvers is None:
+                slot_resolvers = {}
+                self._async_base_slot_resolvers = slot_resolvers
+            slot_resolvers[dependency] = typed_slot_resolver
+            self._set_async_hot_base_dependency(dependency=dependency)
+            return typed_slot_resolver
 
     def _resolve_sync_slot_resolver_from_shared_index(
         self,
         *,
         dependency: Any,
     ) -> Callable[[], Any] | None:
-        slot_index = self._sync_base_slot_indices.get(dependency)
-        if not isinstance(slot_index, int):
-            return None
-        slot_function = self._sync_base_slot_functions.get(dependency)
-        if slot_function is None:
-            slot_function = cast(
-                "Callable[[Any], Any] | None",
-                self._resolve_base_slot_function(
-                    slot_index=slot_index,
-                    slot_prefix="resolve_",
-                ),
-            )
-            if slot_function is None:
-                self._sync_base_slot_indices.pop(dependency, None)
+        with self._shared_state_lock:
+            slot_index = self._sync_base_slot_indices.get(dependency)
+            if not isinstance(slot_index, int):
                 return None
-            self._sync_base_slot_functions[dependency] = slot_function
-        slot_resolver = self._bind_base_slot_resolver(
-            slot_index=slot_index,
-            slot_prefix="resolve_",
-        )
-        if slot_resolver is None:
-            self._sync_base_slot_indices.pop(dependency, None)
-            self._sync_base_slot_functions.pop(dependency, None)
-            return None
-        typed_slot_resolver = cast("Callable[[], Any]", slot_resolver)
-        slot_resolvers = self._sync_base_slot_resolvers
-        if slot_resolvers is None:
-            slot_resolvers = {}
-            self._sync_base_slot_resolvers = slot_resolvers
-        slot_resolvers[dependency] = typed_slot_resolver
-        self._set_sync_hot_base_dependency(dependency=dependency)
-        return typed_slot_resolver
+            slot_function = self._sync_base_slot_functions.get(dependency)
+            if slot_function is None:
+                slot_function = cast(
+                    "Callable[[Any], Any] | None",
+                    self._resolve_base_slot_function(
+                        slot_index=slot_index,
+                        slot_prefix="resolve_",
+                    ),
+                )
+                if slot_function is None:
+                    self._sync_base_slot_indices.pop(dependency, None)
+                    return None
+                self._sync_base_slot_functions[dependency] = slot_function
+            slot_resolver = self._bind_base_slot_resolver(
+                slot_index=slot_index,
+                slot_prefix="resolve_",
+            )
+            if slot_resolver is None:
+                self._sync_base_slot_indices.pop(dependency, None)
+                self._sync_base_slot_functions.pop(dependency, None)
+                return None
+            typed_slot_resolver = cast("Callable[[], Any]", slot_resolver)
+            slot_resolvers = self._sync_base_slot_resolvers
+            if slot_resolvers is None:
+                slot_resolvers = {}
+                self._sync_base_slot_resolvers = slot_resolvers
+            slot_resolvers[dependency] = typed_slot_resolver
+            self._set_sync_hot_base_dependency(dependency=dependency)
+            return typed_slot_resolver
 
     def _resolve_async_slot_resolver_from_shared_index(
         self,
         *,
         dependency: Any,
     ) -> Callable[[], Awaitable[Any]] | None:
-        slot_index = self._async_base_slot_indices.get(dependency)
-        if not isinstance(slot_index, int):
-            return None
-        slot_function = self._async_base_slot_functions.get(dependency)
-        if slot_function is None:
-            slot_function = cast(
-                "Callable[[Any], Awaitable[Any]] | None",
-                self._resolve_base_slot_function(
-                    slot_index=slot_index,
-                    slot_prefix="aresolve_",
-                ),
-            )
-            if slot_function is None:
-                self._async_base_slot_indices.pop(dependency, None)
+        with self._shared_state_lock:
+            slot_index = self._async_base_slot_indices.get(dependency)
+            if not isinstance(slot_index, int):
                 return None
-            self._async_base_slot_functions[dependency] = slot_function
-        slot_resolver = self._bind_base_slot_resolver(
-            slot_index=slot_index,
-            slot_prefix="aresolve_",
-        )
-        if slot_resolver is None:
-            self._async_base_slot_indices.pop(dependency, None)
-            self._async_base_slot_functions.pop(dependency, None)
-            return None
-        typed_slot_resolver = cast("Callable[[], Awaitable[Any]]", slot_resolver)
-        slot_resolvers = self._async_base_slot_resolvers
-        if slot_resolvers is None:
-            slot_resolvers = {}
-            self._async_base_slot_resolvers = slot_resolvers
-        slot_resolvers[dependency] = typed_slot_resolver
-        self._set_async_hot_base_dependency(dependency=dependency)
-        return typed_slot_resolver
+            slot_function = self._async_base_slot_functions.get(dependency)
+            if slot_function is None:
+                slot_function = cast(
+                    "Callable[[Any], Awaitable[Any]] | None",
+                    self._resolve_base_slot_function(
+                        slot_index=slot_index,
+                        slot_prefix="aresolve_",
+                    ),
+                )
+                if slot_function is None:
+                    self._async_base_slot_indices.pop(dependency, None)
+                    return None
+                self._async_base_slot_functions[dependency] = slot_function
+            slot_resolver = self._bind_base_slot_resolver(
+                slot_index=slot_index,
+                slot_prefix="aresolve_",
+            )
+            if slot_resolver is None:
+                self._async_base_slot_indices.pop(dependency, None)
+                self._async_base_slot_functions.pop(dependency, None)
+                return None
+            typed_slot_resolver = cast("Callable[[], Awaitable[Any]]", slot_resolver)
+            slot_resolvers = self._async_base_slot_resolvers
+            if slot_resolvers is None:
+                slot_resolvers = {}
+                self._async_base_slot_resolvers = slot_resolvers
+            slot_resolvers[dependency] = typed_slot_resolver
+            self._set_async_hot_base_dependency(dependency=dependency)
+            return typed_slot_resolver
 
     def _set_sync_hot_base_dependency(self, *, dependency: Any) -> None:
         root_wrapper = self._root_wrapper
@@ -1610,14 +1649,16 @@ class _OpenGenericResolver:  # pragma: no cover
         return self._async_hot_slot_function
 
     def set_sync_hot_base_dependency(self, *, dependency: Any) -> None:
-        self._sync_hot_base_dependency = dependency
-        self._sync_hot_slot_function = self._sync_base_slot_functions.get(dependency)
-        self._refresh_shared_child_state()
+        with self._shared_state_lock:
+            self._sync_hot_base_dependency = dependency
+            self._sync_hot_slot_function = self._sync_base_slot_functions.get(dependency)
+            self._refresh_shared_child_state()
 
     def set_async_hot_base_dependency(self, *, dependency: Any) -> None:
-        self._async_hot_base_dependency = dependency
-        self._async_hot_slot_function = self._async_base_slot_functions.get(dependency)
-        self._refresh_shared_child_state()
+        with self._shared_state_lock:
+            self._async_hot_base_dependency = dependency
+            self._async_hot_slot_function = self._async_base_slot_functions.get(dependency)
+            self._refresh_shared_child_state()
 
     def _resolve_scope_transition_path_cached(
         self,
@@ -1628,20 +1669,23 @@ class _OpenGenericResolver:  # pragma: no cover
         if target_scope_level == self._scope_transition_hot_target:
             return self._scope_transition_hot_path
 
-        transition_path = self._scope_transition_cache_for_level.get(target_scope_level)
-        if transition_path is None:
-            transition_path = tuple(
-                _resolve_scope_transition_path(
-                    root_scope=self._root_scope,
-                    current_scope_level=self._scope_level,
-                    scope=scope,
-                    managed_scopes=self._managed_scopes,
+        with self._shared_state_lock:
+            if target_scope_level == self._scope_transition_hot_target:
+                return self._scope_transition_hot_path
+            transition_path = self._scope_transition_cache_for_level.get(target_scope_level)
+            if transition_path is None:
+                transition_path = tuple(
+                    _resolve_scope_transition_path(
+                        root_scope=self._root_scope,
+                        current_scope_level=self._scope_level,
+                        scope=scope,
+                        managed_scopes=self._managed_scopes,
+                    )
                 )
-            )
-            self._scope_transition_cache_for_level[target_scope_level] = transition_path
-        self._scope_transition_hot_target = target_scope_level
-        self._scope_transition_hot_path = transition_path
-        return transition_path
+                self._scope_transition_cache_for_level[target_scope_level] = transition_path
+            self._scope_transition_hot_target = target_scope_level
+            self._scope_transition_hot_path = transition_path
+            return transition_path
 
     def _resolve_sync_annotation_preflight(self, *, dependency: Any) -> Any:
         maybe_value = self._resolve_maybe_sync(dependency=dependency)

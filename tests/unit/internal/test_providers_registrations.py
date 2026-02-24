@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 
 from diwire import BaseScope, Lifetime, Scope
@@ -62,3 +64,20 @@ def test_add_override_removes_previous_slot_registration() -> None:
     assert registrations.get_by_slot(second_spec.slot) is second_spec
     with pytest.raises(KeyError):
         registrations.get_by_slot(first_spec.slot)
+
+
+def test_provider_spec_slot_assignment_is_unique_under_concurrency() -> None:
+    initial_slot = ProviderSpec.SLOT_COUNTER
+    spec_count = 128
+
+    def _build_spec(index: int) -> ProviderSpec:
+        return _provider_spec(
+            provides=type(f"ConcurrentService{index}", (), {}),
+            scope_level=Scope.APP,
+        )
+
+    with ThreadPoolExecutor(max_workers=32) as executor:
+        slots = [spec.slot for spec in executor.map(_build_spec, range(spec_count))]
+
+    assert len(set(slots)) == spec_count
+    assert min(slots) > initial_slot
