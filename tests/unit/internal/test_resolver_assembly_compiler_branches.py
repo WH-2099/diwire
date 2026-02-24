@@ -241,7 +241,7 @@ def test_extract_function_code_raises_for_missing_function() -> None:
 
 
 def test_compiler_enter_scope_error_and_deep_chain_branches() -> None:
-    container = Container()
+    container = Container(use_resolver_context=False)
 
     class _RequestOnly:
         pass
@@ -265,7 +265,7 @@ def test_compiler_enter_scope_error_and_deep_chain_branches() -> None:
 
 
 def test_compiler_stateless_scope_reuse_branches() -> None:
-    container = Container()
+    container = Container(use_resolver_context=False)
     container.add_instance(1, provides=int)
 
     root = cast(
@@ -3078,6 +3078,97 @@ async def test_resolver_aexit_single_cleanup_and_conversion_branches() -> None:
     await compiler_module._resolver_aexit(one_generator_resolver, None, None, None)
     assert one_gen.closed is True
     assert async_events[-1] == "single-sync"
+
+
+def test_resolver_exit_fast_paths_clear_state_on_cleanup_error() -> None:
+    class _FailClose:
+        def close(self) -> None:
+            msg = "close boom"
+            raise RuntimeError(msg)
+
+    resolver_single = SimpleNamespace(
+        _cleanup_callbacks=[],
+        _cleanup_callback_single=_FailClose(),
+        _owned_scope_resolvers=(),
+        _active=True,
+    )
+    with pytest.raises(RuntimeError, match="close boom"):
+        compiler_module._resolver_exit(resolver_single, None, None, None)
+    assert resolver_single._cleanup_callback_single is None
+    assert resolver_single._active is False
+
+    resolver_callback = SimpleNamespace(
+        _cleanup_callbacks=[(2, _FailClose())],
+        _cleanup_callback_single=None,
+        _owned_scope_resolvers=(),
+        _active=True,
+    )
+    with pytest.raises(RuntimeError, match="close boom"):
+        compiler_module._resolver_exit(resolver_callback, None, None, None)
+    assert resolver_callback._active is False
+
+
+@pytest.mark.asyncio
+async def test_resolver_aexit_fast_paths_clear_state_on_cleanup_error() -> None:
+    class _FailClose:
+        def close(self) -> None:
+            msg = "close boom"
+            raise RuntimeError(msg)
+
+    resolver_single = SimpleNamespace(
+        _cleanup_callbacks=[],
+        _cleanup_callback_single=_FailClose(),
+        _owned_scope_resolvers=(),
+        _active=True,
+    )
+    with pytest.raises(RuntimeError, match="close boom"):
+        await compiler_module._resolver_aexit(resolver_single, None, None, None)
+    assert resolver_single._cleanup_callback_single is None
+    assert resolver_single._active is False
+
+    resolver_callback = SimpleNamespace(
+        _cleanup_callbacks=[(2, _FailClose())],
+        _cleanup_callback_single=None,
+        _owned_scope_resolvers=(),
+        _active=True,
+    )
+    with pytest.raises(RuntimeError, match="close boom"):
+        await compiler_module._resolver_aexit(resolver_callback, None, None, None)
+    assert resolver_callback._active is False
+
+
+def test_generated_exit_fast_path_clears_state_on_close_error() -> None:
+    class _Resource:
+        pass
+
+    def _provider() -> Any:
+        yield _Resource()
+
+    class _FailClose:
+        def close(self) -> None:
+            msg = "close boom"
+            raise RuntimeError(msg)
+
+    container = Container(use_resolver_context=False)
+    container.add_generator(
+        _provider,
+        provides=_Resource,
+        scope=Scope.REQUEST,
+        lifetime=Lifetime.SCOPED,
+    )
+    root_resolver = container.compile()
+    request_scope = root_resolver.enter_scope()
+    request_scope_any = cast("Any", request_scope)
+    request_scope_any._cleanup_callbacks = []
+    request_scope_any._cleanup_callback_single = _FailClose()
+    request_scope_any._owned_scope_resolvers = ()
+    request_scope_any._active = True
+
+    with pytest.raises(RuntimeError, match="close boom"):
+        request_scope.__exit__(None, None, None)
+
+    assert request_scope_any._cleanup_callback_single is None
+    assert request_scope_any._active is False
 
 
 @pytest.mark.asyncio

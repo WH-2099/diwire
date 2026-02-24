@@ -1212,13 +1212,18 @@ class ResolversAssemblyCompiler:
                     "if exc_type is None and not self._owned_scope_resolvers and not self._cleanup_callbacks:",
                     "    single_cleanup = self._cleanup_callback_single",
                     "    if single_cleanup is not None:",
-                    "        single_cleanup.close()",
-                    "        self._cleanup_callback_single = None",
-                    "        self._active = False",
+                    "        try:",
+                    "            single_cleanup.close()",
+                    "        finally:",
+                    "            self._cleanup_callback_single = None",
+                    "            self._active = False",
                     "        return None",
                     "if self._cleanup_callback_single is not None:",
-                    "    self._cleanup_callbacks.append((2, self._cleanup_callback_single))",
-                    "    self._cleanup_callback_single = None",
+                    "    single_cleanup = self._cleanup_callback_single",
+                    "    try:",
+                    "        self._cleanup_callbacks.append((2, single_cleanup))",
+                    "    finally:",
+                    "        self._cleanup_callback_single = None",
                     "return _resolver_exit(self, exc_type, exc_value, traceback)",
                 ],
                 generated_globals=generated_globals,
@@ -2252,6 +2257,68 @@ async def _execute_async_cleanup_callback(
     )
 
 
+def _execute_fast_single_cleanup_sync(*, self: Any, single_cleanup: Any) -> None:
+    try:
+        if isinstance(single_cleanup, tuple):
+            cleanup_kind, cleanup = single_cleanup
+            if cleanup_kind == _CLEANUP_KIND_SYNC:
+                cleanup(None, None, None)
+            else:
+                cleanup.close()
+        else:
+            single_cleanup.close()
+    finally:
+        self._cleanup_callback_single = None
+        self._active = False
+
+
+def _execute_fast_single_callback_sync(*, self: Any, cleanup_kind: int, cleanup: Any) -> None:
+    try:
+        if cleanup_kind == _CLEANUP_KIND_SYNC:
+            cleanup(None, None, None)
+        elif cleanup_kind == _CLEANUP_KIND_SYNC_GENERATOR:
+            cleanup.close()
+        else:
+            msg = "Cannot execute async cleanup in sync context. Use 'async with'."
+            raise DIWireAsyncDependencyInSyncContextError(msg)
+    finally:
+        self._active = False
+
+
+async def _execute_fast_single_cleanup_async(*, self: Any, single_cleanup: Any) -> None:
+    try:
+        if isinstance(single_cleanup, tuple):
+            cleanup_kind, cleanup = single_cleanup
+            if cleanup_kind == _CLEANUP_KIND_SYNC:
+                cleanup(None, None, None)
+            elif cleanup_kind == _CLEANUP_KIND_ASYNC:
+                await cleanup(None, None, None)
+            else:
+                cleanup.close()
+        else:
+            single_cleanup.close()
+    finally:
+        self._cleanup_callback_single = None
+        self._active = False
+
+
+async def _execute_fast_single_callback_async(
+    *,
+    self: Any,
+    cleanup_kind: int,
+    cleanup: Any,
+) -> None:
+    try:
+        if cleanup_kind == _CLEANUP_KIND_SYNC:
+            cleanup(None, None, None)
+        elif cleanup_kind == _CLEANUP_KIND_ASYNC:
+            await cleanup(None, None, None)
+        else:
+            cleanup.close()
+    finally:
+        self._active = False
+
+
 def _resolver_exit(
     self: Any,
     exc_type: type[BaseException] | None,
@@ -2268,16 +2335,10 @@ def _resolver_exit(
         and single_cleanup is not None
         and not cleanup_callbacks
     ):
-        if isinstance(single_cleanup, tuple):
-            cleanup_kind, cleanup = single_cleanup
-            if cleanup_kind == _CLEANUP_KIND_SYNC:
-                cleanup(None, None, None)
-            else:
-                cleanup.close()
-        else:
-            single_cleanup.close()
-        self._cleanup_callback_single = None
-        self._active = False
+        _execute_fast_single_cleanup_sync(
+            self=self,
+            single_cleanup=single_cleanup,
+        )
         return
 
     if single_cleanup is not None:
@@ -2290,14 +2351,11 @@ def _resolver_exit(
     cleanup_error: BaseException | None = None
     if exc_type is None and not owned_scope_resolvers and len(cleanup_callbacks) == 1:
         cleanup_kind, cleanup = cleanup_callbacks.pop()
-        if cleanup_kind == _CLEANUP_KIND_SYNC:
-            cleanup(None, None, None)
-        elif cleanup_kind == _CLEANUP_KIND_SYNC_GENERATOR:
-            cleanup.close()
-        else:
-            msg = "Cannot execute async cleanup in sync context. Use 'async with'."
-            raise DIWireAsyncDependencyInSyncContextError(msg)
-        self._active = False
+        _execute_fast_single_callback_sync(
+            self=self,
+            cleanup_kind=cleanup_kind,
+            cleanup=cleanup,
+        )
         return
 
     while cleanup_callbacks:
@@ -2344,18 +2402,10 @@ def _resolver_aexit(
             and single_cleanup is not None
             and not cleanup_callbacks
         ):
-            if isinstance(single_cleanup, tuple):
-                cleanup_kind, cleanup = single_cleanup
-                if cleanup_kind == _CLEANUP_KIND_SYNC:
-                    cleanup(None, None, None)
-                elif cleanup_kind == _CLEANUP_KIND_ASYNC:
-                    await cleanup(None, None, None)
-                else:
-                    cleanup.close()
-            else:
-                single_cleanup.close()
-            self._cleanup_callback_single = None
-            self._active = False
+            await _execute_fast_single_cleanup_async(
+                self=self,
+                single_cleanup=single_cleanup,
+            )
             return
 
         if single_cleanup is not None:
@@ -2368,13 +2418,11 @@ def _resolver_aexit(
         cleanup_error: BaseException | None = None
         if exc_type is None and not owned_scope_resolvers and len(cleanup_callbacks) == 1:
             cleanup_kind, cleanup = cleanup_callbacks.pop()
-            if cleanup_kind == _CLEANUP_KIND_SYNC:
-                cleanup(None, None, None)
-            elif cleanup_kind == _CLEANUP_KIND_ASYNC:
-                await cleanup(None, None, None)
-            else:
-                cleanup.close()
-            self._active = False
+            await _execute_fast_single_callback_async(
+                self=self,
+                cleanup_kind=cleanup_kind,
+                cleanup=cleanup,
+            )
             return
 
         while cleanup_callbacks:
