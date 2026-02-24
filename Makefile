@@ -37,6 +37,7 @@ benchmark-comparison:
 	uv run pytest tests/benchmarks/test_enter_close_scope_resolve_once.py --benchmark-only --benchmark-columns=ops -q
 	uv run pytest tests/benchmarks/test_enter_close_scope_resolve_100_instance.py --benchmark-only --benchmark-columns=ops -q
 	uv run pytest tests/benchmarks/test_enter_close_scope_resolve_scoped_100.py --benchmark-only --benchmark-columns=ops -q
+	uv run pytest tests/benchmarks/test_enter_close_scope_resolve_generator_request_try_finally.py --benchmark-only --benchmark-columns=ops -q
 	uv run pytest tests/benchmarks/test_enter_close_scope_resolve_open_generic_scoped.py --benchmark-only --benchmark-columns=ops -q
 	uv run pytest tests/benchmarks/test_resolve_deep_transient_chain.py --benchmark-only --benchmark-columns=ops -q
 	uv run pytest tests/benchmarks/test_resolve_wide_transient_graph.py --benchmark-only --benchmark-columns=ops -q
