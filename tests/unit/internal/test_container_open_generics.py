@@ -92,7 +92,10 @@ async def _create_box_async(type_arg: type[T]) -> _IBox[T]:
 
 
 def _generate_box(type_arg: type[T]) -> Generator[_IBox[T], None, None]:
-    yield _Box(type=type_arg)
+    try:
+        yield _Box(type=type_arg)
+    finally:
+        pass
 
 
 @contextmanager

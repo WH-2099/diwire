@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from collections.abc import AsyncGenerator, Generator
 from contextlib import asynccontextmanager, contextmanager
 from types import TracebackType
@@ -94,7 +95,10 @@ def test_register_factory_without_provides_infers_registration_key() -> None:
 
 def test_register_generator_without_provides_infers_registration_key() -> None:
     def build_service() -> Generator[Service, None, None]:
-        yield Service()
+        try:
+            yield Service()
+        finally:
+            pass
 
     container = Container()
 
@@ -190,6 +194,266 @@ def test_register_context_manager_without_provides_and_invalid_annotation_raises
         container.add_context_manager(bad_context_manager)
 
 
+def test_add_generator_rejects_sync_generator_without_try_finally_by_default() -> None:
+    def provide_service() -> Generator[Service, None, None]:
+        yield Service()
+
+    container = Container()
+
+    with pytest.raises(
+        DIWireInvalidRegistrationError,
+        match="must place every yield/yield from inside the body of a try block",
+    ):
+        container.add_generator(provide_service, provides=Service)
+
+
+def test_add_generator_rejects_async_generator_without_try_finally_by_default() -> None:
+    async def provide_service() -> AsyncGenerator[Service, None]:
+        yield Service()
+
+    container = Container()
+
+    with pytest.raises(
+        DIWireInvalidRegistrationError,
+        match="must place every yield/yield from inside the body of a try block",
+    ):
+        container.add_generator(provide_service, provides=Service)
+
+
+def test_add_generator_rejects_yield_inside_try_without_finally() -> None:
+    def provide_service() -> Generator[Service, None, None]:
+        try:
+            yield Service()
+        except Exception:
+            return
+
+    container = Container()
+
+    with pytest.raises(
+        DIWireInvalidRegistrationError,
+        match="must place every yield/yield from inside the body of a try block",
+    ):
+        container.add_generator(provide_service, provides=Service)
+
+
+def test_add_generator_rejects_yield_inside_except_even_with_finally() -> None:
+    def provide_service() -> Generator[Service, None, None]:
+        try:
+            pass
+        except Exception:
+            yield Service()
+        finally:
+            pass
+
+    container = Container()
+
+    with pytest.raises(
+        DIWireInvalidRegistrationError,
+        match="must place every yield/yield from inside the body of a try block",
+    ):
+        container.add_generator(provide_service, provides=Service)
+
+
+def test_add_generator_rejects_yield_inside_else_even_with_finally() -> None:
+    def provide_service() -> Generator[Service, None, None]:
+        try:
+            pass
+        except Exception:
+            return
+        else:
+            yield Service()
+        finally:
+            pass
+
+    container = Container()
+
+    with pytest.raises(
+        DIWireInvalidRegistrationError,
+        match="must place every yield/yield from inside the body of a try block",
+    ):
+        container.add_generator(provide_service, provides=Service)
+
+
+def test_add_generator_rejects_yield_inside_finally_block() -> None:
+    def provide_service() -> Generator[Service, None, None]:
+        try:
+            pass
+        finally:
+            yield Service()
+
+    container = Container()
+
+    with pytest.raises(
+        DIWireInvalidRegistrationError,
+        match="must place every yield/yield from inside the body of a try block",
+    ):
+        container.add_generator(provide_service, provides=Service)
+
+
+def test_add_generator_accepts_yield_inside_try_with_except_else_finally() -> None:
+    def provide_service() -> Generator[Service, None, None]:
+        try:
+            yield Service()
+        except Exception:
+            return
+        else:
+            _ = Service
+        finally:
+            pass
+
+    container = Container()
+    container.add_generator(provide_service, provides=Service)
+
+    provider_spec = container._providers_registrations.get_by_type(Service)
+    assert provider_spec.generator is provide_service
+
+
+def test_add_generator_ignores_nested_function_and_class_scopes_for_validation() -> None:
+    def provide_service() -> Generator[Service, None, None]:
+        def _nested_generator() -> Generator[Service, None, None]:
+            yield Service()
+
+        class _Nested:
+            def create(self) -> Generator[Service, None, None]:
+                yield Service()
+
+        _ = _nested_generator
+        _ = _Nested
+        try:
+            yield Service()
+        finally:
+            pass
+
+    container = Container()
+    container.add_generator(provide_service, provides=Service)
+
+    provider_spec = container._providers_registrations.get_by_type(Service)
+    assert provider_spec.generator is provide_service
+
+
+def test_add_generator_accepts_sync_generator_with_try_finally() -> None:
+    def provide_service() -> Generator[Service, None, None]:
+        try:
+            yield Service()
+        finally:
+            pass
+
+    container = Container()
+    container.add_generator(provide_service, provides=Service)
+
+    provider_spec = container._providers_registrations.get_by_type(Service)
+    assert provider_spec.generator is provide_service
+
+
+def test_add_generator_accepts_async_generator_with_try_finally() -> None:
+    async def provide_service() -> AsyncGenerator[Service, None]:
+        try:
+            yield Service()
+        finally:
+            pass
+
+    container = Container()
+    container.add_generator(provide_service, provides=Service)
+
+    provider_spec = container._providers_registrations.get_by_type(Service)
+    assert provider_spec.generator is provide_service
+
+
+def test_add_generator_can_opt_out_of_try_finally_validation() -> None:
+    def provide_service() -> Generator[Service, None, None]:
+        yield Service()
+
+    container = Container()
+    container.add_generator(
+        provide_service,
+        provides=Service,
+        require_generator_finally=False,
+    )
+
+    provider_spec = container._providers_registrations.get_by_type(Service)
+    assert provider_spec.generator is provide_service
+
+
+def test_add_generator_fails_closed_when_source_inspection_fails_and_opt_out_bypasses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def provide_service() -> Generator[Service, None, None]:
+        try:
+            yield Service()
+        finally:
+            pass
+
+    def _raise_source_error(_target: object) -> str:
+        msg = "source unavailable"
+        raise OSError(msg)
+
+    container = Container()
+    monkeypatch.setattr(inspect, "getsource", _raise_source_error)
+
+    with pytest.raises(
+        DIWireInvalidRegistrationError,
+        match="could not inspect generator provider",
+    ):
+        container.add_generator(provide_service, provides=Service)
+
+    container.add_generator(
+        provide_service,
+        provides=ExplicitService,
+        require_generator_finally=False,
+    )
+
+    provider_spec = container._providers_registrations.get_by_type(ExplicitService)
+    assert provider_spec.generator is provide_service
+
+
+def test_add_generator_fails_closed_when_source_has_multiple_non_matching_functions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def provide_service() -> Generator[Service, None, None]:
+        try:
+            yield Service()
+        finally:
+            pass
+
+    def _source_with_multiple_functions(_target: object) -> str:
+        return "def first() -> int:\n    return 1\n\ndef second() -> int:\n    return 2\n"
+
+    container = Container()
+    monkeypatch.setattr(inspect, "getsource", _source_with_multiple_functions)
+
+    with pytest.raises(
+        DIWireInvalidRegistrationError,
+        match="could not inspect generator provider",
+    ):
+        container.add_generator(provide_service, provides=Service)
+
+
+def test_add_generator_uses_single_function_source_fallback_when_name_does_not_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def provide_service() -> Generator[Service, None, None]:
+        try:
+            yield Service()
+        finally:
+            pass
+
+    def _single_non_matching_source(_target: object) -> str:
+        return (
+            "def different_name() -> Generator[Service, None, None]:\n"
+            "    try:\n"
+            "        yield Service()\n"
+            "    finally:\n"
+            "        pass\n"
+        )
+
+    container = Container()
+    monkeypatch.setattr(inspect, "getsource", _single_non_matching_source)
+    container.add_generator(provide_service, provides=Service)
+
+    provider_spec = container._providers_registrations.get_by_type(Service)
+    assert provider_spec.generator is provide_service
+
+
 def test_explicit_provides_bypasses_return_type_inference_for_all_provider_kinds() -> None:
     def bad_factory() -> Service:
         return Service()
@@ -283,7 +547,10 @@ def test_add_returns_none_and_registers_provider() -> None:
 
 def test_add_generator_returns_none_and_registers_provider() -> None:
     def build_service() -> Generator[DecoratorService, None, None]:
-        yield DecoratorService()
+        try:
+            yield DecoratorService()
+        finally:
+            pass
 
     container = Container()
 

@@ -61,7 +61,10 @@ def test_registration_default_from_container_applies_to_all_non_instance_registr
         return FactoryService()
 
     def build_generator() -> Generator[GeneratorService, None, None]:
-        yield GeneratorService()
+        try:
+            yield GeneratorService()
+        finally:
+            pass
 
     @contextmanager
     def build_context_manager() -> Generator[ContextManagerService, None, None]:
@@ -95,7 +98,10 @@ def test_registration_override_lock_mode_takes_precedence() -> None:
         return OverrideFactoryService()
 
     def build_generator() -> Generator[OverrideGeneratorService, None, None]:
-        yield OverrideGeneratorService()
+        try:
+            yield OverrideGeneratorService()
+        finally:
+            pass
 
     @contextmanager
     def build_context_manager() -> Generator[OverrideContextManagerService, None, None]:

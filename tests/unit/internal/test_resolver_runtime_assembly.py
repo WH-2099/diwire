@@ -384,7 +384,10 @@ def test_registering_after_compile_invalidates_compilation_and_rebinds_lazy_entr
         return _RegisteredByFactory()
 
     def build_generator() -> Generator[_RegisteredByGenerator, None, None]:
-        yield _RegisteredByGenerator()
+        try:
+            yield _RegisteredByGenerator()
+        finally:
+            pass
 
     class _ManagedContext:
         def __enter__(self) -> _RegisteredByContextManager:
@@ -1409,7 +1412,10 @@ def test_sync_generator_cleanup_disabled_keeps_cleanup_callbacks_empty() -> None
 
     def provide_resource() -> Generator[_Resource, None, None]:
         events.append("enter")
-        yield _Resource()
+        try:
+            yield _Resource()
+        finally:
+            pass
 
     container = Container()
     container.add_generator(
@@ -1465,7 +1471,10 @@ async def test_async_generator_runs_cleanup_on_async_scope_exit() -> None:
 
 def test_sync_resolution_for_async_generator_raises_async_dependency_error() -> None:
     async def provide_resource() -> AsyncGenerator[_Resource, None]:
-        yield _Resource()
+        try:
+            yield _Resource()
+        finally:
+            pass
 
     container = Container()
     container.add_generator(provide_resource, provides=_Resource)
@@ -1518,7 +1527,10 @@ async def test_async_context_manager_provider_uses_aenter_and_aexit() -> None:
 
 def test_sync_scope_exit_raises_when_async_cleanup_callbacks_are_present() -> None:
     async def provide_resource() -> AsyncGenerator[_Resource, None]:
-        yield _Resource()
+        try:
+            yield _Resource()
+        finally:
+            pass
 
     container = Container()
     container.add_generator(
@@ -1992,7 +2004,10 @@ async def test_async_cleanup_does_not_override_body_exception_and_forwards_exc_i
 @pytest.mark.asyncio
 async def test_async_generator_dependency_chain_requires_aresolve() -> None:
     async def provide_resource() -> AsyncGenerator[_Resource, None]:
-        yield _Resource()
+        try:
+            yield _Resource()
+        finally:
+            pass
 
     def build_dependent(resource: _Resource) -> _DependsOnResource:
         return _DependsOnResource(resource)

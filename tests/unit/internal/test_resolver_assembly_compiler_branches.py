@@ -3142,7 +3142,10 @@ def test_generated_exit_fast_path_clears_state_on_close_error() -> None:
         pass
 
     def _provider() -> Any:
-        yield _Resource()
+        try:
+            yield _Resource()
+        finally:
+            pass
 
     class _FailClose:
         def close(self) -> None:

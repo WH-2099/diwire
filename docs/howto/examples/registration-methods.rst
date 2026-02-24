@@ -93,3 +93,17 @@ Run locally
 .. literalinclude:: ../../../examples/ex_02_registration_methods/06_explicit_dependencies.py
    :language: python
    :class: diwire-example py-run
+
+Add generator finally validation
+--------------------------------
+
+Run locally
+~~~~~~~~~~~
+
+.. code-block:: bash
+
+   uv run python examples/ex_02_registration_methods/07_add_generator_finally_validation.py
+
+.. literalinclude:: ../../../examples/ex_02_registration_methods/07_add_generator_finally_validation.py
+   :language: python
+   :class: diwire-example py-run

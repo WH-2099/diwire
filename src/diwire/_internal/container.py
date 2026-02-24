@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import ast
 import functools
 import inspect
 import logging
+import textwrap
 import threading
 from collections.abc import AsyncGenerator, Awaitable, Callable, Generator, Mapping
 from contextlib import contextmanager, suppress
@@ -613,6 +615,7 @@ class Container:
         lock_mode: LockMode | Literal["from_container"] = "from_container",
         dependency_registration_policy: DependencyRegistrationPolicy
         | Literal["from_container"] = "from_container",
+        require_generator_finally: bool = True,
     ) -> None:
         """Register a generator or async-generator provider with cleanup.
 
@@ -629,6 +632,10 @@ class Container:
             dependencies: Explicit dependency mapping, or ``"infer"``.
             lock_mode: Lock strategy, or ``"from_container"``.
             dependency_registration_policy: Override dependency autoregistration.
+            require_generator_finally: Validate that every ``yield`` / ``yield from``
+                appears inside the body of a ``try`` with a non-empty ``finally``.
+                Pass ``False`` to skip this validation for intentionally unusual
+                generator providers.
 
         Raises:
             DIWireInvalidRegistrationError: If registration arguments are invalid.
@@ -638,6 +645,8 @@ class Container:
         Notes:
             Cleanup is deterministic only when the owning resolver is closed
             (`with`/`async with` or explicit close/aclose).
+            By default, registration validates generator source to enforce
+            ``yield`` placement inside ``try/finally`` blocks.
 
         Examples:
             .. code-block:: python
@@ -657,6 +666,10 @@ class Container:
         generator_value = cast("Any", generator)
         if not callable(generator_value):
             msg = "add_generator() parameter 'generator' must be callable."
+            raise DIWireInvalidRegistrationError(msg)
+        require_generator_finally_value = cast("Any", require_generator_finally)
+        if not isinstance(require_generator_finally_value, bool):
+            msg = "add_generator() parameter 'require_generator_finally' must be bool."
             raise DIWireInvalidRegistrationError(msg)
 
         generator_provider = cast("GeneratorProvider[Any]", generator_value)
@@ -695,6 +708,8 @@ class Container:
             generator=generator_provider,
             explicit_dependencies=explicit_dependencies,
         )
+        if require_generator_finally_value:
+            self._validate_generator_provider_uses_try_finally(generator_provider)
         is_async = self._provider_return_type_extractor.is_generator_async(generator_provider)
         is_any_dependency_async = self._provider_return_type_extractor.is_any_dependency_async(
             dependencies_for_provider,
@@ -715,6 +730,112 @@ class Container:
             needs_cleanup=True,
             dependencies=dependencies_for_provider,
             resolved_dependency_registration_policy=resolved_dependency_registration_policy,
+        )
+
+    def _validate_generator_provider_uses_try_finally(
+        self,
+        provider: GeneratorProvider[Any],
+    ) -> None:
+        unwrapped_provider = inspect.unwrap(provider)
+        if not (
+            inspect.isgeneratorfunction(unwrapped_provider)
+            or inspect.isasyncgenfunction(unwrapped_provider)
+        ):
+            return
+
+        provider_name = self._callable_name(cast("Callable[..., Any]", unwrapped_provider))
+        function_node: ast.FunctionDef | ast.AsyncFunctionDef
+
+        try:
+            source = inspect.getsource(unwrapped_provider)
+            parsed_source = ast.parse(textwrap.dedent(source))
+            function_node = self._resolve_generator_function_ast_node(
+                parsed_source=parsed_source,
+                provider_name=provider_name,
+                function_name=getattr(unwrapped_provider, "__name__", ""),
+            )
+        except (OSError, SyntaxError, TypeError, ValueError) as error:
+            msg = (
+                "add_generator() could not inspect generator provider "
+                f"'{provider_name}' for try/finally validation; pass "
+                "require_generator_finally=False if you intentionally want to skip "
+                "this validation."
+            )
+            raise DIWireInvalidRegistrationError(msg) from error
+
+        if self._generator_yields_are_protected_by_try_finally(function_node):
+            return
+
+        msg = (
+            "add_generator() provider "
+            f"'{provider_name}' must place every yield/yield from inside the body "
+            "of a try block with a non-empty finally block; pass "
+            "require_generator_finally=False if you intentionally want to skip this "
+            "validation."
+        )
+        raise DIWireInvalidRegistrationError(msg)
+
+    def _resolve_generator_function_ast_node(
+        self,
+        *,
+        parsed_source: ast.Module,
+        provider_name: str,
+        function_name: str,
+    ) -> ast.FunctionDef | ast.AsyncFunctionDef:
+        function_nodes = [
+            node
+            for node in parsed_source.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        ]
+        matching_function_nodes = [node for node in function_nodes if node.name == function_name]
+        if len(matching_function_nodes) == 1:
+            return matching_function_nodes[0]
+        if len(function_nodes) == 1:
+            return function_nodes[0]
+
+        msg = (
+            "add_generator() could not inspect generator provider "
+            f"'{provider_name}' for try/finally validation; pass "
+            "require_generator_finally=False if you intentionally want to skip "
+            "this validation."
+        )
+        raise DIWireInvalidRegistrationError(msg)
+
+    def _generator_yields_are_protected_by_try_finally(
+        self,
+        function_node: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> bool:
+        try_star_type = cast("type[ast.AST] | None", getattr(ast, "TryStar", None))
+        try_node_types = (ast.Try,) if try_star_type is None else (ast.Try, try_star_type)
+
+        def _walk_node(node: ast.AST, *, inside_valid_try_body: bool) -> bool:
+            if isinstance(node, (ast.Yield, ast.YieldFrom)):
+                return inside_valid_try_body
+            if isinstance(node, try_node_types):
+                try_node = cast("Any", node)
+                body_is_valid = inside_valid_try_body or bool(try_node.finalbody)
+                for statement in try_node.body:
+                    if not _walk_node(statement, inside_valid_try_body=body_is_valid):
+                        return False
+                for handler in try_node.handlers:
+                    if not _walk_node(handler, inside_valid_try_body=inside_valid_try_body):
+                        return False
+                for statement in try_node.orelse:
+                    if not _walk_node(statement, inside_valid_try_body=inside_valid_try_body):
+                        return False
+                for statement in try_node.finalbody:
+                    if not _walk_node(statement, inside_valid_try_body=inside_valid_try_body):
+                        return False
+                return True
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                return True
+            for child in ast.iter_child_nodes(node):
+                if not _walk_node(child, inside_valid_try_body=inside_valid_try_body):
+                    return False
+            return True
+
+        return all(
+            _walk_node(statement, inside_valid_try_body=False) for statement in function_node.body
         )
 
     def add_context_manager(
