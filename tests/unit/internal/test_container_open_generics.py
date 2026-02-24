@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import inspect
+import threading
 import typing
 from collections.abc import AsyncGenerator, Generator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Annotated, Any, Generic, TypeVar, cast
 
 import pytest
@@ -14,10 +17,12 @@ from diwire import (
     Container,
     Injected,
     Lifetime,
+    LockMode,
     ResolverContext,
     Scope,
     resolver_context,
 )
+from diwire._internal.injection import INJECT_WRAPPER_MARKER
 from diwire._internal.providers import ProviderDependency
 from diwire.exceptions import (
     DIWireAsyncDependencyInSyncContextError,
@@ -64,12 +69,21 @@ class _BoxB(_IBox[T]):
     type: type[T]
 
 
+@dataclass
+class _NoArgBox(_IBox[T]):
+    pass
+
+
 class _SpecialIntBox(_IBox[int]):
     def __init__(self) -> None:
         self.type = int
 
 
 def _create_box(type_arg: type[T]) -> _IBox[T]:
+    return _Box(type=type_arg)
+
+
+def _create_box_positional_only(type_arg: type[T], /) -> _IBox[T]:
     return _Box(type=type_arg)
 
 
@@ -109,6 +123,9 @@ def test_open_concrete_registration_resolves_closed_generic_requests() -> None:
 
     assert isinstance(resolved, _Box)
     assert resolved.type is str
+    materialized = container._providers_registrations.find_by_type(_IBox[str])
+    assert materialized is not None
+    assert materialized.factory is not None
 
 
 def test_open_concrete_registration_resolves_non_component_annotated_closed_key() -> None:
@@ -154,6 +171,22 @@ def test_open_factory_registration_supports_type_argument_injection() -> None:
 
     assert cast("Any", container.resolve(_IBox[int])).type is int
     assert cast("Any", container.resolve(_IBox[str])).type is str
+    materialized = container._providers_registrations.find_by_type(_IBox[int])
+    assert materialized is not None
+    assert materialized.factory is not None
+
+
+def test_open_factory_materialized_wrapper_uses_bind_partial_fallback_for_positional_only() -> None:
+    container = Container()
+    container.add_factory(_create_box_positional_only, provides=_IBox)
+
+    resolved = container.resolve(_IBox[int])
+
+    assert isinstance(resolved, _Box)
+    assert resolved.type is int
+    materialized = container._providers_registrations.find_by_type(_IBox[int])
+    assert materialized is not None
+    assert materialized.factory is not None
 
 
 def test_open_generator_registration_supports_type_argument_injection() -> None:
@@ -163,6 +196,9 @@ def test_open_generator_registration_supports_type_argument_injection() -> None:
     resolved = container.resolve(_IBox[bytes])
     assert isinstance(resolved, _Box)
     assert resolved.type is bytes
+    materialized = container._providers_registrations.find_by_type(_IBox[bytes])
+    assert materialized is not None
+    assert materialized.generator is not None
 
 
 def test_open_context_manager_registration_works_inside_resolver_context() -> None:
@@ -173,6 +209,9 @@ def test_open_context_manager_registration_works_inside_resolver_context() -> No
         resolved = resolver.resolve(_IBox[float])
         assert isinstance(resolved, _Box)
         assert resolved.type is float
+    materialized = container._providers_registrations.find_by_type(_IBox[float])
+    assert materialized is not None
+    assert materialized.context_manager is not None
 
 
 def test_open_generic_scope_resolver_close_runs_cleanup_via_wrapper_delegate() -> None:
@@ -212,6 +251,23 @@ async def test_open_async_context_manager_registration_works_in_async_path() -> 
         resolved = await resolver.aresolve(_IBox[float])
         assert isinstance(resolved, _Box)
         assert resolved.type is float
+    materialized = container._providers_registrations.find_by_type(_IBox[float])
+    assert materialized is not None
+    assert materialized.context_manager is not None
+
+
+@pytest.mark.asyncio
+async def test_open_async_factory_materializes_closed_key() -> None:
+    container = Container()
+    container.add_factory(_create_box_async, provides=_IBox)
+
+    resolved = await container.aresolve(_IBox[int])
+
+    assert isinstance(resolved, _Box)
+    assert resolved.type is int
+    materialized = container._providers_registrations.find_by_type(_IBox[int])
+    assert materialized is not None
+    assert materialized.factory is not None
 
 
 @pytest.mark.asyncio
@@ -311,6 +367,165 @@ def test_typevar_bound_is_validated_at_resolve_time() -> None:
     invalid_key = cast("Any", _ModelBox)[str]
     with pytest.raises(DIWireInvalidGenericTypeArgumentError, match="bound"):
         container.resolve(invalid_key)
+    assert container._providers_registrations.find_by_type(invalid_key) is None
+
+
+def test_materialized_closed_key_is_purged_before_registration_mutation() -> None:
+    container = Container()
+    container.add_instance("keep", provides=str)
+    container.add(_BoxA, provides=_IBox)
+
+    first = container.resolve(_IBox[int])
+    assert isinstance(first, _BoxA)
+    assert container._providers_registrations.find_by_type(_IBox[int]) is not None
+
+    container.add(_BoxB, provides=_IBox)
+    assert container._providers_registrations.find_by_type(_IBox[int]) is None
+    assert container.resolve(str) == "keep"
+
+    second = container.resolve(_IBox[int])
+    assert isinstance(second, _BoxB)
+
+
+def test_materialized_open_concrete_without_type_argument_dependencies_stays_concrete() -> None:
+    container = Container()
+    container.add(_NoArgBox, provides=_IBox)
+
+    resolved = container.resolve(_IBox[int])
+
+    assert isinstance(resolved, _NoArgBox)
+    materialized = container._providers_registrations.find_by_type(_IBox[int])
+    assert materialized is not None
+    assert materialized.concrete_type is _NoArgBox
+
+
+def test_open_generic_dispatch_cache_is_used_after_first_materialized_resolve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = Container()
+    container.add_factory(_create_box, provides=_IBox)
+
+    registry = container._open_generic_registry
+    find_best_match_call_count = 0
+    original_find_best_match = registry.find_best_match
+
+    def _counting_find_best_match(dependency: Any) -> Any:
+        nonlocal find_best_match_call_count
+        find_best_match_call_count += 1
+        return original_find_best_match(dependency)
+
+    monkeypatch.setattr(registry, "find_best_match", _counting_find_best_match)
+
+    first = container.resolve(_IBox[int])
+    second = container.resolve(_IBox[int])
+
+    assert isinstance(first, _Box)
+    assert isinstance(second, _Box)
+    assert find_best_match_call_count == 1
+
+
+def test_materialized_open_generic_preserves_inject_wrapper_marker() -> None:
+    container = Container()
+
+    def _inject_wrapped_factory(type_arg: type[T]) -> _IBox[T]:
+        return _Box(type=type_arg)
+
+    wrapped_factory = resolver_context.inject(_inject_wrapped_factory)
+    container.add_factory(wrapped_factory, provides=_IBox)
+
+    resolved = container.resolve(_IBox[int])
+
+    assert isinstance(resolved, _Box)
+    materialized = container._providers_registrations.find_by_type(_IBox[int])
+    assert materialized is not None
+    assert materialized.factory is not None
+    assert bool(getattr(materialized.factory, INJECT_WRAPPER_MARKER, False))
+
+
+def test_unresolved_nested_typevar_error_does_not_materialize_invalid_closed_key() -> None:
+    container = Container()
+
+    def _invalid_factory(type_arg: type[T], value: list[U]) -> _IBox[T]:
+        _ = value
+        return _Box(type=type_arg)
+
+    container.add_factory(_invalid_factory, provides=_IBox)
+
+    with pytest.raises(DIWireInvalidGenericTypeArgumentError, match="unresolved TypeVars"):
+        container.resolve(_IBox[int])
+    assert container._providers_registrations.find_by_type(_IBox[int]) is None
+
+
+def test_materialization_callback_noops_when_closed_dependency_is_already_registered() -> None:
+    container = Container()
+    container.add_instance(1, provides=int)
+
+    dummy_match = SimpleNamespace(spec=object(), typevar_map={})
+    container._materialize_closed_open_generic_spec(int, dummy_match)
+
+    assert container.resolve(int) == 1
+
+
+def test_materialization_callback_skips_invalid_generic_argument_binding_without_typevar() -> None:
+    container = Container()
+
+    def _factory(dummy: int) -> _IBox[int]:
+        _ = dummy
+        return _Box(type=int)
+
+    parameter = inspect.signature(_factory).parameters["dummy"]
+    binding = SimpleNamespace(
+        kind="generic_argument",
+        typevar=None,
+        dependency=ProviderDependency(provides=int, parameter=parameter),
+    )
+    spec = SimpleNamespace(
+        bindings=(binding,),
+        provider_kind="factory",
+        provider=_factory,
+        provider_is_inject_wrapper=False,
+        lifetime=Lifetime.SCOPED,
+        scope=Scope.APP,
+        is_async=False,
+        is_any_dependency_async=False,
+        needs_cleanup=False,
+        lock_mode=LockMode.NONE,
+    )
+    match = SimpleNamespace(spec=spec, typevar_map={})
+
+    container._materialize_closed_open_generic_spec(_IBox[int], match)
+    assert container._providers_registrations.find_by_type(_IBox[int]) is None
+
+
+def test_materialization_callback_skips_missing_typevar_argument_value() -> None:
+    container = Container()
+
+    def _factory(type_arg: type[T]) -> _IBox[T]:
+        return _Box(type=type_arg)
+
+    parameter = inspect.signature(_factory).parameters["type_arg"]
+    typevar = TypeVar("typevar")
+    binding = SimpleNamespace(
+        kind="generic_argument",
+        typevar=typevar,
+        dependency=ProviderDependency(provides=type[T], parameter=parameter),
+    )
+    spec = SimpleNamespace(
+        bindings=(binding,),
+        provider_kind="factory",
+        provider=_factory,
+        provider_is_inject_wrapper=False,
+        lifetime=Lifetime.SCOPED,
+        scope=Scope.APP,
+        is_async=False,
+        is_any_dependency_async=False,
+        needs_cleanup=False,
+        lock_mode=LockMode.NONE,
+    )
+    match = SimpleNamespace(spec=spec, typevar_map={})
+
+    container._materialize_closed_open_generic_spec(_IBox[int], match)
+    assert container._providers_registrations.find_by_type(_IBox[int]) is None
 
 
 def test_injected_open_generic_uses_open_resolver_fallback() -> None:
@@ -454,3 +669,95 @@ def test_closed_generic_injection_helpers_cover_non_injected_dependency_paths() 
         )
         is not int
     )
+
+
+def test_runtime_materialization_serializes_provider_registration_add_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = Container()
+    container.add_factory(
+        _create_box,
+        provides=_IBox,
+        lifetime=Lifetime.TRANSIENT,
+        scope=Scope.APP,
+    )
+    container.compile()
+
+    active_add_calls = 0
+    observed_overlap = False
+    active_add_calls_lock = threading.Lock()
+    start_event = threading.Event()
+    original_add = container._providers_registrations.add
+
+    def _tracked_add(spec: Any) -> None:
+        nonlocal active_add_calls, observed_overlap
+        start_event.wait(timeout=5)
+        with active_add_calls_lock:
+            active_add_calls += 1
+            if active_add_calls > 1:
+                observed_overlap = True
+        try:
+            original_add(spec)
+        finally:
+            with active_add_calls_lock:
+                active_add_calls -= 1
+
+    monkeypatch.setattr(container._providers_registrations, "add", _tracked_add)
+
+    dependencies = [type(f"_ConcurrentType{index}", (), {}) for index in range(32)]
+
+    def _resolve_dependency(dependency: type[Any]) -> Any:
+        return container.resolve(_IBox[dependency])
+
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        futures = [executor.submit(_resolve_dependency, dependency) for dependency in dependencies]
+        start_event.set()
+        for future in futures:
+            future.result()
+
+    assert observed_overlap is False
+    for dependency in dependencies:
+        assert container._providers_registrations.find_by_type(_IBox[dependency]) is not None
+
+
+def test_compile_is_safe_during_concurrent_runtime_materialization() -> None:
+    container = Container()
+    container.add_factory(
+        _create_box,
+        provides=_IBox,
+        lifetime=Lifetime.TRANSIENT,
+        scope=Scope.APP,
+    )
+    container.compile()
+
+    failures: list[BaseException] = []
+    failures_lock = threading.Lock()
+    dependencies = [type(f"_CompileRaceType{index}", (), {}) for index in range(48)]
+
+    def _record_failure(error: BaseException) -> None:
+        with failures_lock:
+            failures.append(error)
+
+    def _resolve_dependency(dependency: type[Any]) -> None:
+        try:
+            container.resolve(_IBox[dependency])
+        except BaseException as error:
+            _record_failure(error)
+
+    def _compile_many_times() -> None:
+        try:
+            for _ in range(200):
+                container.compile()
+        except BaseException as error:
+            _record_failure(error)
+
+    with ThreadPoolExecutor(max_workers=20) as executor:
+        compile_future = executor.submit(_compile_many_times)
+        resolve_futures = [
+            executor.submit(_resolve_dependency, dependency) for dependency in dependencies
+        ]
+        compile_future.result()
+        for resolve_future in resolve_futures:
+            resolve_future.result()
+
+    assert failures == []

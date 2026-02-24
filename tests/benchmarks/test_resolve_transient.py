@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import punq
 import rodi
 from dishka import Provider
 from wireup import injectable
@@ -71,16 +70,3 @@ def test_benchmark_wireup_resolve_transient(benchmark: Any) -> None:
             _ = scope.get(_TransientService)
 
         run_benchmark(benchmark, bench_wireup_transient)
-
-
-def test_benchmark_punq_resolve_transient(benchmark: Any) -> None:
-    container = punq.Container()
-    container.register(_TransientService)
-    first = container.resolve(_TransientService)
-    second = container.resolve(_TransientService)
-    assert first is not second
-
-    def bench_punq_transient() -> None:
-        _ = container.resolve(_TransientService)
-
-    run_benchmark(benchmark, bench_punq_transient)

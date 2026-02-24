@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import threading
 from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Generator
 from contextlib import AbstractAsyncContextManager, AbstractContextManager
 from dataclasses import dataclass, field
@@ -103,6 +104,7 @@ class ProviderSpec:
     """
 
     SLOT_COUNTER: ClassVar[ProviderSlot] = 0
+    SLOT_COUNTER_LOCK: ClassVar[Any] = threading.Lock()
 
     provides: UserDependency
     """The dependency type that this provider supplies."""
@@ -137,8 +139,9 @@ class ProviderSpec:
     """A unique slot number assigned to this provider specification."""
 
     def __post_init__(self) -> None:
-        self.__class__.SLOT_COUNTER += 1
-        self.slot = self.SLOT_COUNTER
+        with self.SLOT_COUNTER_LOCK:
+            self.__class__.SLOT_COUNTER += 1
+            self.slot = self.SLOT_COUNTER
 
 
 class Lifetime(Enum):

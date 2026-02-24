@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import punq
 import rodi
 from dishka import Provider
 from wireup import injectable
@@ -124,23 +123,3 @@ def test_benchmark_wireup_resolve_deep_transient_chain(benchmark: Any) -> None:
             _ = scope.get(_Root)
 
         run_benchmark(benchmark, bench_wireup_deep_chain, iterations=25_000)
-
-
-def test_benchmark_punq_resolve_deep_transient_chain(benchmark: Any) -> None:
-    container = punq.Container()
-    container.register(_Dep0)
-    container.register(_Dep1)
-    container.register(_Dep2)
-    container.register(_Dep3)
-    container.register(_Dep4)
-    container.register(_Root)
-    first = container.resolve(_Root)
-    second = container.resolve(_Root)
-    assert first is not second
-    assert first.dep_4 is not second.dep_4
-    assert first.dep_4.dep_3.dep_2.dep_1.dep_0 is not second.dep_4.dep_3.dep_2.dep_1.dep_0
-
-    def bench_punq_deep_chain() -> None:
-        _ = container.resolve(_Root)
-
-    run_benchmark(benchmark, bench_punq_deep_chain, iterations=25_000)

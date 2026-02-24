@@ -61,6 +61,7 @@ Methodology details for diwire in these benchmarks:
   ``dependency_registration_policy=DependencyRegistrationPolicy.IGNORE``
 - All benchmark registrations are explicit.
 - ``container.compile()`` is called once after registration setup and before timed loops to measure compiled steady-state entrypoints.
+- ``-`` in comparison tables means the scenario was not benchmarked for that library (for example, unsupported feature paths).
 
 Results (diwire vs rodi, dishka, and wireup)
 --------------------------------------------

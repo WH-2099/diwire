@@ -8,9 +8,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Final, cast
 
-KNOWN_BENCHMARK_LIBRARIES: Final[tuple[str, ...]] = ("diwire", "rodi", "dishka", "wireup", "punq")
+KNOWN_BENCHMARK_LIBRARIES: Final[tuple[str, ...]] = ("diwire", "rodi", "dishka", "wireup")
 DEFAULT_BENCHMARK_LIBRARIES: Final[tuple[str, ...]] = ("diwire", "rodi", "dishka", "wireup")
-OPTIONAL_BENCHMARK_LIBRARIES: Final[tuple[str, ...]] = ("punq",)
+OPTIONAL_BENCHMARK_LIBRARIES: Final[tuple[str, ...]] = ("rodi", "wireup")
 _BENCHMARK_NAME_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"^test_benchmark_(?P<library>[a-z0-9]+)_",
 )
