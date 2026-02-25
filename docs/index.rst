@@ -1,5 +1,5 @@
 .. meta::
-   :description: Type-driven dependency injection for Python. Zero runtime dependencies. Compiled resolver, scopes+cleanup, async, open generics, and Injected/FromContext markers.
+   :description: Type-driven dependency injection for Python. Zero runtime dependencies. Compiled resolver, scopes+cleanup, async, open generics, and Injected marker.
    :keywords: dependency injection, python dependency injection, di container, inversion of control, ioc, type hints dependency injection
 
 diwire
@@ -63,7 +63,7 @@ Why diwire
 - **Compiled resolver**: build fast resolution paths once with ``compile()``.
 - **Scopes + cleanup**: per-request caching and deterministic cleanup via generators/async-generators.
 - **Open generics**: register ``Box[T]`` once and resolve ``Box[User]`` safely.
-- **Function injection**: ``Injected[T]`` and ``FromContext[T]`` markers keep signatures explicit and typed.
+- **Function injection**: ``Injected[T]`` keeps signatures explicit and typed.
 
 Performance
 -----------

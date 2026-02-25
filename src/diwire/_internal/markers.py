@@ -31,13 +31,8 @@ class Component(NamedTuple):
 class InjectedMarker:
     """A marker used to indicate a parameter should be injected from the DI container.
 
-    Used to identify parameters that need to be removed from callable signatures
-    when resolving dependencies.
+    Used to identify parameters that need to be removed from callable signatures.
     """
-
-
-class FromContextMarker:
-    """Marker that indicates dependency value should be taken from scope context."""
 
 
 class MaybeMarker:
@@ -70,32 +65,6 @@ if TYPE_CHECKING:
             @resolver_context.inject
             def run(service: Injected[Service], value: int) -> str:
                 return service.handle(value)
-    """
-
-    FromContext = Union[T, T]  # noqa: UP007,PYI016
-    """Mark a parameter to resolve from the current scope context mapping.
-
-    At runtime ``FromContext[T]`` becomes ``Annotated[T, FromContextMarker()]``.
-    Context lookups ignore non-``Component`` metadata in ``Annotated`` keys.
-    For plain values use ``FromContext[int]`` with ``context={int: ...}``.
-    For component-scoped values
-    use ``FromContext[Annotated[int, Component('name')]]`` with the matching
-    annotated key in ``context``.
-
-    Missing context keys fail during resolution with
-    ``DIWireDependencyNotRegisteredError``.
-
-    Examples:
-        .. code-block:: python
-
-            Priority = Annotated[int, Component("priority")]
-
-            @resolver_context.inject(scope=Scope.REQUEST)
-            def handler(
-                request_id: FromContext[int],
-                priority: FromContext[Priority],
-            ) -> tuple[int, int]:
-                return request_id, priority
     """
 
     Provider = Callable[[], T]
@@ -148,41 +117,6 @@ else:
                 metadata = args[1:]
                 return _build_annotated((inner, *metadata, InjectedMarker()))
             return _build_annotated((item, InjectedMarker()))
-
-    class FromContext:
-        """Mark a parameter to resolve from scope context instead of providers.
-
-        At runtime ``FromContext[T]`` resolves to
-        ``Annotated[T, FromContextMarker()]``. Context lookup ignores non-component
-        metadata, so ``FromContext[int]`` looks up ``int`` and
-        ``FromContext[Annotated[int, Component('priority')]]`` looks up that
-        annotated token.
-
-        Missing context keys fail during resolution with
-        ``DIWireDependencyNotRegisteredError``.
-
-        Examples:
-            .. code-block:: python
-
-                Priority = Annotated[int, Component("priority")]
-
-
-                @resolver_context.inject(scope=Scope.REQUEST)
-                def handler(
-                    request_id: FromContext[int],
-                    priority: FromContext[Priority],
-                ) -> tuple[int, int]:
-                    return request_id, priority
-
-        """
-
-        def __class_getitem__(cls, item: T) -> Annotated[T, FromContextMarker]:
-            if get_origin(item) is Annotated:
-                args = get_args(item)
-                inner = args[0]
-                metadata = args[1:]
-                return _build_annotated((inner, *metadata, FromContextMarker()))
-            return _build_annotated((item, FromContextMarker()))
 
     class Maybe:
         """Mark a dependency as explicitly optional.
@@ -262,41 +196,6 @@ def strip_maybe_annotation(annotation: Any) -> Any:
     parameter_type = annotation_args[0]
     metadata = annotation_args[1:]
     filtered_metadata = tuple(item for item in metadata if not isinstance(item, MaybeMarker))
-    if not filtered_metadata:
-        return parameter_type
-    return _build_annotated((parameter_type, *filtered_metadata))
-
-
-def is_from_context_annotation(annotation: Any) -> bool:
-    """Return True when annotation is Annotated[..., FromContextMarker()].
-
-    Args:
-        annotation: Annotation value to inspect or normalize.
-
-    """
-    if get_origin(annotation) is not Annotated:
-        return False
-    annotation_args = get_args(annotation)
-    if len(annotation_args) < _ANNOTATED_MARKER_MIN_ARGS:
-        return False
-    metadata = annotation_args[1:]
-    return any(isinstance(item, FromContextMarker) for item in metadata)
-
-
-def strip_from_context_annotation(annotation: Any) -> Any:
-    """Strip FromContext marker while preserving non-context Annotated metadata.
-
-    Args:
-        annotation: Annotation value to inspect or normalize.
-
-    """
-    if not is_from_context_annotation(annotation):
-        return annotation
-
-    annotation_args = get_args(annotation)
-    parameter_type = annotation_args[0]
-    metadata = annotation_args[1:]
-    filtered_metadata = tuple(item for item in metadata if not isinstance(item, FromContextMarker))
     if not filtered_metadata:
         return parameter_type
     return _build_annotated((parameter_type, *filtered_metadata))

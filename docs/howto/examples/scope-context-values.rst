@@ -1,5 +1,5 @@
 .. meta::
-   :description: diwire scope context values examples: passing context into scopes and consuming values via FromContext[T].
+   :description: diwire ContextVar examples: register normal providers that read task-local values.
 
 Scope context values
 ====================
@@ -7,25 +7,26 @@ Scope context values
 What you'll learn
 -----------------
 
-- Pass per-scope values via ``enter_scope(..., context={...})``.
-- Resolve context values via ``FromContext[T]`` in providers and injected callables.
+- Use ``contextvars.ContextVar`` for task-local request values.
+- Register normal providers (``add_factory`` / ``add``) that call ``ContextVar.get()``.
+- Override values in nested work with ``token = var.set(...)`` and ``var.reset(token)``.
 
-Provider from context
----------------------
+Provider with ContextVar
+------------------------
 
 Run locally
 ~~~~~~~~~~~
 
 .. code-block:: bash
 
-   uv run python examples/ex_17_scope_context_values/01_provider_from_context.py
+   uv run python examples/ex_17_scope_context_values/01_provider_contextvar.py
 
-.. literalinclude:: ../../../examples/ex_17_scope_context_values/01_provider_from_context.py
+.. literalinclude:: ../../../examples/ex_17_scope_context_values/01_provider_contextvar.py
    :language: python
    :class: diwire-example py-run
 
-Nested scope inheritance
-------------------------
+Nested override with tokens
+---------------------------
 
 Run locally
 ~~~~~~~~~~~
@@ -38,8 +39,8 @@ Run locally
    :language: python
    :class: diwire-example py-run
 
-Injected callable context
--------------------------
+Injected callable using ContextVar-backed dependency
+----------------------------------------------------
 
 Run locally
 ~~~~~~~~~~~
@@ -52,12 +53,8 @@ Run locally
    :language: python
    :class: diwire-example py-run
 
-Annotated context keys
-----------------------
-
-Only ``Component(...)`` metadata is identity-bearing. Non-component metadata is
-stripped when resolving context keys. See also
-:doc:`/howto/examples/annotation-normalization`.
+Annotated provider keys with ContextVar
+---------------------------------------
 
 Run locally
 ~~~~~~~~~~~
@@ -70,8 +67,8 @@ Run locally
    :language: python
    :class: diwire-example py-run
 
-Context without scope open
---------------------------
+ContextVar defaults without opening scopes
+------------------------------------------
 
 Run locally
 ~~~~~~~~~~~

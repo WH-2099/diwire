@@ -18,7 +18,7 @@ resolvers, and free-threaded Python (no-GIL) — all with zero runtime dependenc
 - **Scopes + deterministic cleanup**: generator/async-generator providers clean up on scope exit. ([Scopes](https://docs.diwire.dev/core/scopes.html))
 - **Async resolution**: ``aresolve()`` mirrors ``resolve()`` and async providers are first-class. ([Async](https://docs.diwire.dev/core/async.html))
 - **Open generics**: register once, resolve for many type parameters. ([Open generics](https://docs.diwire.dev/core/open-generics.html))
-- **Function injection**: ``Injected[T]`` and ``FromContext[T]`` for ergonomic handlers. ([Function injection](https://docs.diwire.dev/core/function-injection.html))
+- **Function injection**: ``Injected[T]`` for ergonomic handlers. ([Function injection](https://docs.diwire.dev/core/function-injection.html))
 - **Named components + collect-all**: ``Component("name")`` and ``All[T]``. ([Components](https://docs.diwire.dev/core/components.html))
 - **Concurrency + free-threaded builds**: configurable locking via ``LockMode``. ([Concurrency](https://docs.diwire.dev/howto/advanced/concurrency.html))
 
@@ -242,18 +242,32 @@ back to the container registered as the `resolver_context` fallback (`Container(
 default).
 
 ```python
-from diwire import Container, FromContext, Scope, resolver_context
+from contextvars import ContextVar
+
+from diwire import Container, Injected, Scope, resolver_context
+
+current_user_id_var: ContextVar[int] = ContextVar("current_user_id", default=0)
+
+
+def read_current_user_id() -> int:
+    return current_user_id_var.get()
+
 
 container = Container()
+container.add_factory(read_current_user_id, provides=int, scope=Scope.REQUEST)
 
 
 @resolver_context.inject(scope=Scope.REQUEST)
-def handler(value: FromContext[int]) -> int:
+def handler(value: Injected[int]) -> int:
     return value
 
 
-with container.enter_scope(Scope.REQUEST, context={int: 7}):
-    print(handler())  # => 7
+with container.enter_scope(Scope.REQUEST) as request_scope:
+    token = current_user_id_var.set(7)
+    try:
+        print(handler(diwire_resolver=request_scope))  # => 7
+    finally:
+        current_user_id_var.reset(token)
 ```
 
 ## Stability

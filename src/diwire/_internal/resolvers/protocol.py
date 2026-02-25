@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, overload
 
@@ -47,14 +46,11 @@ class ResolverProtocol(Protocol):
     def enter_scope(
         self,
         scope: BaseScope | None = None,
-        *,
-        context: Mapping[Any, Any] | None = None,
     ) -> ResolverProtocol:
         """Enter a new scope and return a new resolver for that scope.
 
         Args:
             scope: Scope value used to filter registrations or open nested resolution scope.
-            context: Optional mapping of context values to bind in the entered scope.
 
         """
 

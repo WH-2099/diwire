@@ -5,15 +5,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Annotated, Any, get_args, get_origin, get_type_hints
 
-from diwire._internal.markers import (
-    InjectedMarker,
-    is_from_context_annotation,
-    strip_from_context_annotation,
-)
+from diwire._internal.markers import InjectedMarker
 
 _ANNOTATED_DEPENDENCY_MIN_ARGS = 2
 INJECT_RESOLVER_KWARG = "diwire_resolver"
-INJECT_CONTEXT_KWARG = "diwire_context"
 INJECT_WRAPPER_MARKER = "__diwire_inject_wrapper__"
 
 
@@ -26,20 +21,11 @@ class InjectedParameter:
 
 
 @dataclass(frozen=True, slots=True)
-class ContextParameter:
-    """Context parameter metadata for callable wrapper generation."""
-
-    name: str
-    dependency: Any
-
-
-@dataclass(frozen=True, slots=True)
 class InjectedCallableInspection:
     """Injection metadata derived from a callable signature and annotations."""
 
     signature: inspect.Signature
     injected_parameters: tuple[InjectedParameter, ...]
-    context_parameters: tuple[ContextParameter, ...]
     public_signature: inspect.Signature
 
 
@@ -56,13 +42,9 @@ class InjectedCallableInspector:
         """
         signature = inspect.signature(callable_obj)
         injected_parameters = self.extract_injected_parameters(callable_obj=callable_obj)
-        context_parameters = self.extract_context_parameters(callable_obj=callable_obj)
         hidden_parameter_names = {
             injected_parameter.name for injected_parameter in injected_parameters
         }
-        hidden_parameter_names.update(
-            context_parameter.name for context_parameter in context_parameters
-        )
         public_signature = self.build_public_injected_signature(
             signature=signature,
             hidden_parameter_names=hidden_parameter_names,
@@ -70,7 +52,6 @@ class InjectedCallableInspector:
         return InjectedCallableInspection(
             signature=signature,
             injected_parameters=injected_parameters,
-            context_parameters=context_parameters,
             public_signature=public_signature,
         )
 
@@ -101,33 +82,6 @@ class InjectedCallableInspector:
             )
 
         return tuple(injected_parameters)
-
-    def extract_context_parameters(
-        self,
-        *,
-        callable_obj: Callable[..., Any],
-    ) -> tuple[ContextParameter, ...]:
-        """Extract FromContext[...] parameter metadata from a callable.
-
-        Args:
-            callable_obj: Callable object whose signature and annotations are inspected.
-
-        """
-        signature = inspect.signature(callable_obj)
-        resolved_annotations = self.resolved_annotations_for_injection(callable_obj=callable_obj)
-        context_parameters: list[ContextParameter] = []
-        for parameter in signature.parameters.values():
-            annotation = resolved_annotations.get(parameter.name, parameter.annotation)
-            dependency = self.resolve_from_context_dependency(annotation=annotation)
-            if dependency is None:
-                continue
-            context_parameters.append(
-                ContextParameter(
-                    name=parameter.name,
-                    dependency=dependency,
-                ),
-            )
-        return tuple(context_parameters)
 
     def resolved_annotations_for_injection(
         self,
@@ -169,20 +123,6 @@ class InjectedCallableInspector:
         if not filtered_metadata:
             return parameter_type
         return self.build_annotated_type(parameter_type=parameter_type, metadata=filtered_metadata)
-
-    def resolve_from_context_dependency(self, *, annotation: Any) -> Any | None:
-        """Resolve FromContext[...] annotations to context keys.
-
-        Args:
-            annotation: Annotation value to inspect or normalize.
-
-        """
-        if annotation is inspect.Signature.empty or isinstance(annotation, str):
-            return None
-        if not is_from_context_annotation(annotation):
-            return None
-        _ = strip_from_context_annotation(annotation)
-        return annotation
 
     def build_annotated_type(
         self,

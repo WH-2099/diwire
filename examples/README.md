@@ -831,21 +831,25 @@ if __name__ == "__main__":
 ## 17. Scope Context Values
 
 Files:
-- [01_provider_from_context.py](#ex-17-scope-context-values--01-provider-from-context-py)
+- [01_provider_contextvar.py](#ex-17-scope-context-values--01-provider-contextvar-py)
 - [02_nested_scope_inheritance.py](#ex-17-scope-context-values--02-nested-scope-inheritance-py)
 - [03_injected_callable_context.py](#ex-17-scope-context-values--03-injected-callable-context-py)
 - [04_annotated_context_keys.py](#ex-17-scope-context-values--04-annotated-context-keys-py)
 - [05_context_without_scope_open.py](#ex-17-scope-context-values--05-context-without-scope-open-py)
 
-<a id="ex-17-scope-context-values--01-provider-from-context-py"></a>
-### [01_provider_from_context.py](ex_17_scope_context_values/01_provider_from_context.py)
+<a id="ex-17-scope-context-values--01-provider-contextvar-py"></a>
+### [01_provider_contextvar.py](ex_17_scope_context_values/01_provider_contextvar.py)
 
-Focused example: provider dependencies can read ``FromContext[T]`` values.
+Focused example: providers can read values from ``contextvars.ContextVar``.
 
 ```python
 from __future__ import annotations
 
-from diwire import Container, FromContext, Lifetime, Scope
+from contextvars import ContextVar
+
+from diwire import Container, Lifetime, Scope
+
+request_value_var: ContextVar[int] = ContextVar("request_value", default=0)
 
 
 class RequestValue:
@@ -853,8 +857,8 @@ class RequestValue:
         self.value = value
 
 
-def build_request_value(value: FromContext[int]) -> RequestValue:
-    return RequestValue(value=value)
+def build_request_value() -> RequestValue:
+    return RequestValue(value=request_value_var.get())
 
 
 def main() -> None:
@@ -866,10 +870,14 @@ def main() -> None:
         lifetime=Lifetime.TRANSIENT,
     )
 
-    with container.enter_scope(Scope.REQUEST, context={int: 7}) as request_scope:
-        resolved = request_scope.resolve(RequestValue)
+    with container.enter_scope(Scope.REQUEST) as request_scope:
+        token = request_value_var.set(7)
+        try:
+            resolved = request_scope.resolve(RequestValue)
+        finally:
+            request_value_var.reset(token)
 
-    print(f"provider_from_context={resolved.value}")  # => provider_from_context=7
+    print(f"provider_contextvar={resolved.value}")  # => provider_contextvar=7
 
 
 if __name__ == "__main__":
@@ -879,25 +887,59 @@ if __name__ == "__main__":
 <a id="ex-17-scope-context-values--02-nested-scope-inheritance-py"></a>
 ### [02_nested_scope_inheritance.py](ex_17_scope_context_values/02_nested_scope_inheritance.py)
 
-Focused example: nested scopes inherit context and child scopes can override keys.
+Focused example: nested scope work can use ContextVar override/reset tokens.
 
 ```python
 from __future__ import annotations
 
-from diwire import Container, FromContext, Scope
+from contextvars import ContextVar
+
+from diwire import Container, Lifetime, Scope
+
+request_id_var: ContextVar[int] = ContextVar("request_id", default=-1)
+tenant_var: ContextVar[str] = ContextVar("tenant", default="unset")
+
+
+def read_request_id() -> int:
+    return request_id_var.get()
+
+
+def read_tenant() -> str:
+    return tenant_var.get()
 
 
 def main() -> None:
     container = Container()
+    container.add_factory(
+        read_request_id,
+        provides=int,
+        scope=Scope.REQUEST,
+        lifetime=Lifetime.TRANSIENT,
+    )
+    container.add_factory(
+        read_tenant,
+        provides=str,
+        scope=Scope.REQUEST,
+        lifetime=Lifetime.TRANSIENT,
+    )
 
-    with (
-        container.enter_scope(Scope.REQUEST, context={int: 1, str: "parent"}) as request_scope,
-        request_scope.enter_scope(Scope.ACTION) as action_scope,
-        action_scope.enter_scope(Scope.STEP, context={int: 2}) as step_scope,
-    ):
-        inherited_value = action_scope.resolve(FromContext[int])
-        overridden_value = step_scope.resolve(FromContext[int])
-        inherited_parent_key = step_scope.resolve(FromContext[str])
+    with container.enter_scope(Scope.REQUEST) as request_scope:
+        request_id_token = request_id_var.set(1)
+        tenant_token = tenant_var.set("parent")
+        try:
+            with request_scope.enter_scope(Scope.ACTION) as action_scope:
+                inherited_value = action_scope.resolve(int)
+
+                override_token = request_id_var.set(2)
+                try:
+                    with action_scope.enter_scope(Scope.STEP) as step_scope:
+                        overridden_value = step_scope.resolve(int)
+                        inherited_parent_key = step_scope.resolve(str)
+                finally:
+                    request_id_var.reset(override_token)
+        finally:
+            tenant_var.reset(tenant_token)
+            request_id_var.reset(request_id_token)
 
     print(f"action_inherits_parent={inherited_value}")  # => action_inherits_parent=1
     print(f"step_overrides_parent={overridden_value}")  # => step_overrides_parent=2
@@ -913,25 +955,44 @@ if __name__ == "__main__":
 <a id="ex-17-scope-context-values--03-injected-callable-context-py"></a>
 ### [03_injected_callable_context.py](ex_17_scope_context_values/03_injected_callable_context.py)
 
-Injected callables can consume FromContext values via diwire_context.
+Injected callables can consume dependencies built from ContextVar values.
 
 ```python
 from __future__ import annotations
 
-from diwire import Container, FromContext, Scope, resolver_context
+from contextvars import ContextVar
+
+from diwire import Container, Injected, Lifetime, Scope, resolver_context
+
+current_value_var: ContextVar[int] = ContextVar("current_value", default=0)
+
+
+def read_current_value() -> int:
+    return current_value_var.get()
 
 
 def main() -> None:
-    Container()
+    container = Container()
+    container.add_factory(
+        read_current_value,
+        provides=int,
+        scope=Scope.REQUEST,
+        lifetime=Lifetime.TRANSIENT,
+    )
 
     @resolver_context.inject(scope=Scope.REQUEST)
-    def handler(value: FromContext[int]) -> int:
+    def handler(value: Injected[int]) -> int:
         return value
 
-    from_context = handler(diwire_context={int: 7})
-    overridden = handler(value=8)
+    with container.enter_scope(Scope.REQUEST) as request_scope:
+        token = current_value_var.set(7)
+        try:
+            from_contextvar = handler(diwire_resolver=request_scope)
+            overridden = handler(diwire_resolver=request_scope, value=8)
+        finally:
+            current_value_var.reset(token)
 
-    print(f"from_context={from_context}")  # => from_context=7
+    print(f"from_contextvar={from_contextvar}")  # => from_contextvar=7
     print(f"overridden={overridden}")  # => overridden=8
 
 
@@ -942,29 +1003,42 @@ if __name__ == "__main__":
 <a id="ex-17-scope-context-values--04-annotated-context-keys-py"></a>
 ### [04_annotated_context_keys.py](ex_17_scope_context_values/04_annotated_context_keys.py)
 
-Annotated tokens can be used as scope context keys.
+Annotated provider keys can be backed by ContextVar values.
 
 ```python
 from __future__ import annotations
 
+from contextvars import ContextVar
 from typing import Annotated, TypeAlias
 
-from diwire import Component, Container, FromContext, Lifetime, Scope
+from diwire import Component, Container, Lifetime, Scope
 
 ReplicaNumber: TypeAlias = Annotated[int, Component("replica")]
 
+replica_number_var: ContextVar[int] = ContextVar("replica_number", default=0)
+
 
 class ReplicaConsumer:
-    def __init__(self, value: int) -> None:
+    def __init__(self, value: ReplicaNumber) -> None:
         self.value = value
 
 
-def build_consumer(value: FromContext[ReplicaNumber]) -> ReplicaConsumer:
+def read_replica_number() -> ReplicaNumber:
+    return replica_number_var.get()
+
+
+def build_consumer(value: ReplicaNumber) -> ReplicaConsumer:
     return ReplicaConsumer(value=value)
 
 
 def main() -> None:
     container = Container()
+    container.add_factory(
+        read_replica_number,
+        provides=ReplicaNumber,
+        scope=Scope.REQUEST,
+        lifetime=Lifetime.TRANSIENT,
+    )
     container.add_factory(
         build_consumer,
         provides=ReplicaConsumer,
@@ -972,9 +1046,13 @@ def main() -> None:
         lifetime=Lifetime.TRANSIENT,
     )
 
-    with container.enter_scope(Scope.REQUEST, context={ReplicaNumber: 42}) as request_scope:
-        resolved = request_scope.resolve(ReplicaConsumer)
-        direct = request_scope.resolve(FromContext[ReplicaNumber])
+    with container.enter_scope(Scope.REQUEST) as request_scope:
+        token = replica_number_var.set(42)
+        try:
+            resolved = request_scope.resolve(ReplicaConsumer)
+            direct = request_scope.resolve(ReplicaNumber)
+        finally:
+            replica_number_var.reset(token)
 
     print(f"consumer_value={resolved.value}")  # => consumer_value=42
     print(f"direct_value={direct}")  # => direct_value=42
@@ -987,30 +1065,40 @@ if __name__ == "__main__":
 <a id="ex-17-scope-context-values--05-context-without-scope-open-py"></a>
 ### [05_context_without_scope_open.py](ex_17_scope_context_values/05_context_without_scope_open.py)
 
-Passing diwire_context without opening a scope raises a clear error.
+ContextVar-backed dependencies work with default values without opening scopes.
 
 ```python
 from __future__ import annotations
 
-from diwire import Container, FromContext, resolver_context
-from diwire.exceptions import DIWireInvalidRegistrationError
+from contextvars import ContextVar
+
+from diwire import Container, Injected, Lifetime, resolver_context
+
+current_value_var: ContextVar[int] = ContextVar("current_value_no_scope", default=5)
+
+
+def read_current_value() -> int:
+    return current_value_var.get()
 
 
 def main() -> None:
-    Container()
+    container = Container()
+    container.add_factory(read_current_value, provides=int, lifetime=Lifetime.TRANSIENT)
 
     @resolver_context.inject(auto_open_scope=False)
-    def handler(value: FromContext[int]) -> int:
+    def handler(value: Injected[int]) -> int:
         return value
 
-    try:
-        handler(diwire_context={int: 7})
-    except DIWireInvalidRegistrationError as error:
-        error_name = type(error).__name__
+    default_value = handler()
 
-    print(
-        f"context_without_scope_error={error_name}"
-    )  # => context_without_scope_error=DIWireInvalidRegistrationError
+    token = current_value_var.set(7)
+    try:
+        overridden_value = handler()
+    finally:
+        current_value_var.reset(token)
+
+    print(f"default_value={default_value}")  # => default_value=5
+    print(f"overridden_value={overridden_value}")  # => overridden_value=7
 
 
 if __name__ == "__main__":
@@ -1228,12 +1316,16 @@ Focused example: auto-open scope reuses already-open resolvers.
 from __future__ import annotations
 
 from collections.abc import Generator
+from contextvars import ContextVar
 
-from diwire import Container, FromContext, Injected, Lifetime, Scope, resolver_context
+from diwire import Container, Injected, Lifetime, Scope, resolver_context
 
 
 class RequestResource:
     pass
+
+
+current_value_var: ContextVar[int] = ContextVar("auto_open_scope_reuse_value", default=0)
 
 
 def main() -> None:
@@ -1246,12 +1338,16 @@ def main() -> None:
         finally:
             cleanup_state["cleaned"] = True
 
+    def provide_current_value() -> int:
+        return current_value_var.get()
+
     container.add_generator(
         provide_request_resource,
         provides=RequestResource,
         scope=Scope.REQUEST,
         lifetime=Lifetime.SCOPED,
     )
+    container.add_factory(provide_current_value, provides=int, scope=Scope.SESSION)
 
     @resolver_context.inject(scope=Scope.REQUEST, auto_open_scope=True)
     def use_request_resource(resource: Injected[RequestResource]) -> RequestResource:
@@ -1268,15 +1364,21 @@ def main() -> None:
     )  # => cleanup_after_outer_scope=True
 
     @resolver_context.inject(scope=Scope.SESSION, auto_open_scope=True)
-    def read_value(value: FromContext[int]) -> int:
+    def read_value(value: Injected[int]) -> int:
         return value
 
     with (
-        container.enter_scope(Scope.SESSION, context={int: 11}) as session_scope,
-        session_scope.enter_scope(Scope.REQUEST, context={int: 22}) as request_scope,
+        container.enter_scope(Scope.SESSION) as session_scope,
+        session_scope.enter_scope(Scope.REQUEST) as request_scope,
     ):
-        resolved_value = read_value(diwire_resolver=request_scope)
-        print(f"deeper_scope_context_reused={resolved_value}")  # => deeper_scope_context_reused=22
+        token = current_value_var.set(22)
+        try:
+            resolved_value = read_value(diwire_resolver=request_scope)
+        finally:
+            current_value_var.reset(token)
+        print(
+            f"deeper_scope_contextvar_reused={resolved_value}"
+        )  # => deeper_scope_contextvar_reused=22
 
 
 if __name__ == "__main__":
@@ -3489,7 +3591,7 @@ if __name__ == "__main__":
 
 Files:
 - [01_registration_keys.py](#ex-24-annotation-normalization--01-registration-keys-py)
-- [02_from_context_keys.py](#ex-24-annotation-normalization--02-from-context-keys-py)
+- [02_non_component_metadata_keys.py](#ex-24-annotation-normalization--02-non-component-metadata-keys-py)
 
 <a id="ex-24-annotation-normalization--01-registration-keys-py"></a>
 ### [01_registration_keys.py](ex_24_annotation_normalization/01_registration_keys.py)
@@ -3536,17 +3638,17 @@ if __name__ == "__main__":
     main()
 ```
 
-<a id="ex-24-annotation-normalization--02-from-context-keys-py"></a>
-### [02_from_context_keys.py](ex_24_annotation_normalization/02_from_context_keys.py)
+<a id="ex-24-annotation-normalization--02-non-component-metadata-keys-py"></a>
+### [02_non_component_metadata_keys.py](ex_24_annotation_normalization/02_non_component_metadata_keys.py)
 
-FromContext keys also ignore non-component Annotated metadata.
+Non-component Annotated metadata is ignored for registration key normalization.
 
 ```python
 from __future__ import annotations
 
 from typing import Annotated, TypeAlias
 
-from diwire import Component, Container, FromContext, Scope
+from diwire import Component, Container
 
 Priority: TypeAlias = Annotated[int, Component("priority")]
 PriorityWithMeta: TypeAlias = Annotated[int, Component("priority"), "meta"]
@@ -3554,16 +3656,11 @@ PriorityWithMeta: TypeAlias = Annotated[int, Component("priority"), "meta"]
 
 def main() -> None:
     container = Container()
+    container.add_instance(7, provides=int)
+    container.add_instance(42, provides=Priority)
 
-    with container.enter_scope(
-        Scope.REQUEST,
-        context={
-            int: 7,
-            Priority: 42,
-        },
-    ) as request_scope:
-        plain = request_scope.resolve(FromContext[Annotated[int, "request-id"]])
-        component = request_scope.resolve(FromContext[PriorityWithMeta])
+    plain = container.resolve(Annotated[int, "request-id"])
+    component = container.resolve(PriorityWithMeta)
 
     print(f"plain={plain}")  # => plain=7
     print(f"component={component}")  # => component=42

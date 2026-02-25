@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+from contextvars import ContextVar
 from typing import Any, Generic, TypeVar, cast
 
 import pytest
@@ -8,7 +9,6 @@ import pytest
 from diwire import (
     Container,
     DependencyRegistrationPolicy,
-    FromContext,
     Injected,
     Lifetime,
     Maybe,
@@ -205,15 +205,27 @@ def test_resolve_maybe_closed_generic_uses_open_generic_registration_match() -> 
     assert resolved.type_arg is int
 
 
-def test_resolve_maybe_from_context_returns_none_only_when_context_key_is_missing() -> None:
+def test_resolve_maybe_with_contextvar_backed_provider_uses_current_value() -> None:
+    current_value_var: ContextVar[int] = ContextVar("maybe_current_value", default=3)
+
+    def read_current_value() -> int:
+        return current_value_var.get()
+
     container = _strict_container()
-    container.add(_MaybeBoxImpl, provides=_MaybeBox)
+    container.add_factory(
+        read_current_value,
+        provides=int,
+        scope=Scope.REQUEST,
+        lifetime=Lifetime.TRANSIENT,
+    )
 
     with container.enter_scope(Scope.REQUEST) as request_scope:
-        assert request_scope.resolve(Maybe[FromContext[int]]) is None
-
-    with container.enter_scope(Scope.REQUEST, context={int: 7}) as request_scope:
-        assert request_scope.resolve(Maybe[FromContext[int]]) == 7
+        assert request_scope.resolve(Maybe[int]) == 3
+        token = current_value_var.set(7)
+        try:
+            assert request_scope.resolve(Maybe[int]) == 7
+        finally:
+            current_value_var.reset(token)
 
 
 def test_resolve_maybe_provider_token_keeps_provider_semantics() -> None:

@@ -1,21 +1,55 @@
-"""Focused example: nested scopes inherit context and child scopes can override keys."""
+"""Focused example: nested scope work can use ContextVar override/reset tokens."""
 
 from __future__ import annotations
 
-from diwire import Container, FromContext, Scope
+from contextvars import ContextVar
+
+from diwire import Container, Lifetime, Scope
+
+request_id_var: ContextVar[int] = ContextVar("request_id", default=-1)
+tenant_var: ContextVar[str] = ContextVar("tenant", default="unset")
+
+
+def read_request_id() -> int:
+    return request_id_var.get()
+
+
+def read_tenant() -> str:
+    return tenant_var.get()
 
 
 def main() -> None:
     container = Container()
+    container.add_factory(
+        read_request_id,
+        provides=int,
+        scope=Scope.REQUEST,
+        lifetime=Lifetime.TRANSIENT,
+    )
+    container.add_factory(
+        read_tenant,
+        provides=str,
+        scope=Scope.REQUEST,
+        lifetime=Lifetime.TRANSIENT,
+    )
 
-    with (
-        container.enter_scope(Scope.REQUEST, context={int: 1, str: "parent"}) as request_scope,
-        request_scope.enter_scope(Scope.ACTION) as action_scope,
-        action_scope.enter_scope(Scope.STEP, context={int: 2}) as step_scope,
-    ):
-        inherited_value = action_scope.resolve(FromContext[int])
-        overridden_value = step_scope.resolve(FromContext[int])
-        inherited_parent_key = step_scope.resolve(FromContext[str])
+    with container.enter_scope(Scope.REQUEST) as request_scope:
+        request_id_token = request_id_var.set(1)
+        tenant_token = tenant_var.set("parent")
+        try:
+            with request_scope.enter_scope(Scope.ACTION) as action_scope:
+                inherited_value = action_scope.resolve(int)
+
+                override_token = request_id_var.set(2)
+                try:
+                    with action_scope.enter_scope(Scope.STEP) as step_scope:
+                        overridden_value = step_scope.resolve(int)
+                        inherited_parent_key = step_scope.resolve(str)
+                finally:
+                    request_id_var.reset(override_token)
+        finally:
+            tenant_var.reset(tenant_token)
+            request_id_var.reset(request_id_token)
 
     print(f"action_inherits_parent={inherited_value}")  # => action_inherits_parent=1
     print(f"step_overrides_parent={overridden_value}")  # => step_overrides_parent=2

@@ -9,7 +9,6 @@ In addition to constructor injection, diwire can inject dependencies into functi
 The building blocks are:
 
 - :class:`diwire.Injected` - a type wrapper used as ``Injected[T]`` to mark injected parameters
-- :class:`diwire.FromContext` - a type wrapper used as ``FromContext[T]`` to read per-scope context
 - :meth:`diwire.ResolverContext.inject` - a decorator that returns an injected callable wrapper
 
 Basic usage
@@ -46,7 +45,7 @@ Example:
 Behavior notes
 --------------
 
-- ``Injected[...]`` and ``FromContext[...]`` parameters are removed from runtime ``__signature__``
+- ``Injected[...]`` parameters are removed from runtime ``__signature__``
 - callers can still override injected values by passing explicit keyword arguments
 - by default, the wrapper may enter/exit a scope to satisfy scoped dependencies
 - to disable implicit scope opening, set ``auto_open_scope=False``
@@ -57,29 +56,45 @@ One exception is ``Container(..., use_resolver_context=False)`` mode: unbound
 ``@resolver_context.inject`` calls must pass ``diwire_resolver=...`` explicitly
 (or run under another bound resolver context).
 
-FromContext in injected callables
----------------------------------
+ContextVar pattern for request values
+-------------------------------------
 
-Inject wrappers can resolve ``FromContext[T]`` parameters from scope context values.
-Pass context with reserved kwarg ``diwire_context`` when the wrapper opens a new scope.
-For ``Annotated`` keys, non-``Component`` metadata is ignored for context lookup identity.
+For request-local values, prefer ``contextvars.ContextVar`` and register a normal provider
+that reads ``ContextVar.get()``.
 
 .. code-block:: python
-   :class: diwire-example py-run
 
-   from diwire import Container, FromContext, Scope, resolver_context
+   from contextvars import ContextVar
+
+   from diwire import Container, Injected, Lifetime, Scope, resolver_context
+
+   current_user_id_var: ContextVar[int] = ContextVar("current_user_id", default=0)
+
+
+   def read_current_user_id() -> int:
+       return current_user_id_var.get()
+
 
    container = Container()
+   container.add_factory(
+       read_current_user_id,
+       provides=int,
+       scope=Scope.REQUEST,
+       lifetime=Lifetime.TRANSIENT,
+   )
+
 
    @resolver_context.inject(scope=Scope.REQUEST)
-   def handler(value: FromContext[int]) -> int:
-       return value
+   def handler(user_id: Injected[int]) -> int:
+       return user_id
 
-   print(handler(diwire_context={int: 7}))
-   print(handler(value=8))
 
-If ``diwire_context`` is provided but the wrapper does not open a new scope,
-diwire raises ``DIWireInvalidRegistrationError`` with guidance.
+   with container.enter_scope(Scope.REQUEST) as request_scope:
+       token = current_user_id_var.set(7)
+       try:
+           print(handler(diwire_resolver=request_scope))
+       finally:
+           current_user_id_var.reset(token)
 
 Auto-open scopes (default)
 --------------------------
@@ -89,15 +104,23 @@ wrapper:
 
 - opens a target scope only when entering a deeper scope is needed and valid
 - reuses the current resolver when the target scope is already open (no extra scope entry)
-- reuses the current resolver when it is already deeper than the target scope, including existing
-  scope context values used by ``FromContext[...]``
+- reuses the current resolver when it is already deeper than the target scope
 
 .. code-block:: python
 
-   from diwire import Container, FromContext, Injected, Lifetime, Scope, resolver_context
+   from contextvars import ContextVar
+
+   from diwire import Container, Injected, Lifetime, Scope, resolver_context
 
    class RequestService:
        pass
+
+   current_value_var: ContextVar[int] = ContextVar("current_value", default=0)
+
+
+   def read_current_value() -> int:
+       return current_value_var.get()
+
 
    container = Container()
    container.add(
@@ -106,21 +129,26 @@ wrapper:
        scope=Scope.REQUEST,
        lifetime=Lifetime.SCOPED,
    )
+   container.add_factory(read_current_value, provides=int, scope=Scope.SESSION)
 
    @resolver_context.inject(scope=Scope.REQUEST)
    def use_request_scope(service: Injected[RequestService]) -> RequestService:
        return service
 
    @resolver_context.inject(scope=Scope.SESSION)
-   def read_value(value: FromContext[int]) -> int:
+   def read_value(value: Injected[int]) -> int:
        return value
 
    with container.enter_scope(Scope.REQUEST) as request_scope:
        service = use_request_scope(diwire_resolver=request_scope)
 
-   with container.enter_scope(Scope.SESSION, context={int: 11}) as session_scope:
-       with session_scope.enter_scope(Scope.REQUEST, context={int: 22}) as request_scope:
-           value = read_value(diwire_resolver=request_scope)
+   with container.enter_scope(Scope.SESSION) as session_scope:
+       with session_scope.enter_scope(Scope.REQUEST) as request_scope:
+           token = current_value_var.set(22)
+           try:
+               value = read_value(diwire_resolver=request_scope)
+           finally:
+               current_value_var.reset(token)
 
 Naming note
 -----------

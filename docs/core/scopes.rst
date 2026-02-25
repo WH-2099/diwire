@@ -4,7 +4,7 @@
 Scopes & cleanup
 ================
 
-Scopes give you a way to say: “for this unit of work (request/job), reuse scoped services and clean them up at the end.”
+Scopes give you a way to say: "for this unit of work (request/job), reuse scoped services and clean them up at the end."
 
 Scope model
 -----------
@@ -57,17 +57,10 @@ Generator registrations added via ``add_generator()`` are validated by default a
 
 Runnable example: :doc:`/howto/examples/scopes`.
 
-Scope context values
---------------------
+Task-local values with ContextVar
+---------------------------------
 
-You can attach per-scope context values when entering a scope and resolve them via ``FromContext[T]`` in providers or
-in injected callables.
+For request/task-local data (tenant id, auth claims, request id), use ``contextvars.ContextVar`` and
+register a normal provider that reads ``ContextVar.get()``.
 
-Context key normalization follows the same rule as dependency keys:
-
-- ``FromContext[Annotated[T, \"meta\"]]`` looks up ``T``.
-- ``FromContext[Annotated[T, Component(\"x\"), \"meta\"]]`` looks up
-  ``Annotated[T, Component(\"x\")]``.
-
-Runnable examples: :doc:`/howto/examples/scope-context-values`,
-:doc:`/howto/examples/annotation-normalization`.
+Runnable examples: :doc:`/howto/examples/scope-context-values`.

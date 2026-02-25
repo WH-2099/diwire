@@ -1,22 +1,31 @@
 from __future__ import annotations
 
+from contextvars import ContextVar
+
 import pytest
 
-from diwire import Container, FromContext, Lifetime, Scope
-from diwire.exceptions import DIWireDependencyNotRegisteredError, DIWireScopeMismatchError
+from diwire import Container, Lifetime, Scope
+from diwire.exceptions import DIWireScopeMismatchError
 
 
 class _RequestOnly:
     pass
 
 
-class _ActionFromContext:
-    def __init__(self, value: FromContext[int]) -> None:
+class _ActionContextValue:
+    def __init__(self, value: int) -> None:
         self.value = value
 
 
 class _AsyncRequestOnly:
     pass
+
+
+_action_value_var: ContextVar[int] = ContextVar("action_value", default=0)
+
+
+def _read_action_value() -> int:
+    return _action_value_var.get()
 
 
 def test_container_resolve_uses_context_bound_scope_by_default() -> None:
@@ -66,28 +75,42 @@ def test_container_resolve_does_not_use_context_bound_scope_when_disabled() -> N
 
 def test_container_enter_scope_uses_context_bound_scope_for_nesting() -> None:
     container = Container()
+    container.add_factory(
+        _read_action_value,
+        provides=int,
+        scope=Scope.REQUEST,
+        lifetime=Lifetime.TRANSIENT,
+    )
     container.add(
-        _ActionFromContext,
-        provides=_ActionFromContext,
+        _ActionContextValue,
+        provides=_ActionContextValue,
         scope=Scope.ACTION,
         lifetime=Lifetime.SCOPED,
     )
 
-    with container.enter_scope(Scope.REQUEST, context={int: 7}):
-        with container.enter_scope(Scope.ACTION):
-            assert container.resolve(_ActionFromContext).value == 7
+    with container.enter_scope(Scope.REQUEST):
+        token = _action_value_var.set(7)
+        try:
+            with container.enter_scope(Scope.ACTION):
+                assert container.resolve(_ActionContextValue).value == 7
+        finally:
+            _action_value_var.reset(token)
 
 
-def test_container_enter_scope_without_nesting_does_not_inherit_context() -> None:
+def test_container_enter_scope_uses_contextvar_default_when_token_is_not_set() -> None:
     container = Container(use_resolver_context=False)
+    container.add_factory(
+        _read_action_value,
+        provides=int,
+        scope=Scope.REQUEST,
+        lifetime=Lifetime.TRANSIENT,
+    )
     container.add(
-        _ActionFromContext,
-        provides=_ActionFromContext,
+        _ActionContextValue,
+        provides=_ActionContextValue,
         scope=Scope.ACTION,
         lifetime=Lifetime.SCOPED,
     )
 
-    with container.enter_scope(Scope.REQUEST, context={int: 7}):
-        with container.enter_scope(Scope.ACTION) as action_resolver:
-            with pytest.raises(DIWireDependencyNotRegisteredError, match="Context value"):
-                _ = action_resolver.resolve(_ActionFromContext)
+    with container.enter_scope(Scope.ACTION) as action_resolver:
+        assert action_resolver.resolve(_ActionContextValue).value == 0

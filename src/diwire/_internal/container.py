@@ -23,10 +23,8 @@ from typing import (
 
 from diwire._internal.autoregistration import ConcreteTypeAutoregistrationPolicy
 from diwire._internal.injection import (
-    INJECT_CONTEXT_KWARG,
     INJECT_RESOLVER_KWARG,
     INJECT_WRAPPER_MARKER,
-    ContextParameter,
     InjectedCallableInspector,
     InjectedParameter,
 )
@@ -38,7 +36,6 @@ from diwire._internal.markers import (
     build_annotated_key,
     component_base_key,
     is_all_annotation,
-    is_from_context_annotation,
     is_maybe_annotation,
     is_provider_annotation,
     strip_all_annotation,
@@ -2244,16 +2241,9 @@ class Container:
                 f"'{INJECT_RESOLVER_KWARG}'."
             )
             raise DIWireInvalidRegistrationError(msg)
-        if INJECT_CONTEXT_KWARG in signature.parameters:
-            msg = (
-                f"Callable '{self._callable_name(callable_obj)}' cannot declare reserved parameter "
-                f"'{INJECT_CONTEXT_KWARG}'."
-            )
-            raise DIWireInvalidRegistrationError(msg)
 
         inspected_callable = self._injected_callable_inspector.inspect_callable(callable_obj)
         injected_parameters = inspected_callable.injected_parameters
-        context_parameters = inspected_callable.context_parameters
         resolved_dependency_registration_policy = self._resolve_dependency_registration_policy(
             dependency_registration_policy,
         )
@@ -2298,17 +2288,11 @@ class Container:
 
             @functools.wraps(callable_obj)
             async def _async_injected(*args: Any, **kwargs: Any) -> Any:
-                context = self._pop_inject_context(kwargs)
                 base_resolver = self._resolve_inject_resolver(kwargs)
                 target_scope = get_target_scope()
-                maybe_scoped, scope_opened = self._enter_scope_if_needed(
+                maybe_scoped = self._enter_scope_if_needed(
                     base_resolver=base_resolver,
                     target_scope=target_scope,
-                    context=context,
-                )
-                self._validate_inject_context_usage(
-                    context=context,
-                    scope_opened=scope_opened,
                 )
 
                 if maybe_scoped is base_resolver:
@@ -2318,7 +2302,6 @@ class Container:
                         args=args,
                         kwargs=kwargs,
                         injected_parameters=injected_parameters,
-                        context_parameters=context_parameters,
                     )
                     async_callable = cast("Callable[..., Awaitable[Any]]", callable_obj)
                     return await async_callable(*bound_arguments.args, **bound_arguments.kwargs)
@@ -2331,7 +2314,6 @@ class Container:
                         args=args,
                         kwargs=kwargs,
                         injected_parameters=injected_parameters,
-                        context_parameters=context_parameters,
                     )
                     async_callable = cast("Callable[..., Awaitable[Any]]", callable_obj)
                     return await async_callable(*bound_arguments.args, **bound_arguments.kwargs)
@@ -2341,17 +2323,11 @@ class Container:
 
             @functools.wraps(callable_obj)
             def _sync_injected(*args: Any, **kwargs: Any) -> Any:
-                context = self._pop_inject_context(kwargs)
                 base_resolver = self._resolve_inject_resolver(kwargs)
                 target_scope = get_target_scope()
-                maybe_scoped, scope_opened = self._enter_scope_if_needed(
+                maybe_scoped = self._enter_scope_if_needed(
                     base_resolver=base_resolver,
                     target_scope=target_scope,
-                    context=context,
-                )
-                self._validate_inject_context_usage(
-                    context=context,
-                    scope_opened=scope_opened,
                 )
 
                 if maybe_scoped is base_resolver:
@@ -2361,7 +2337,6 @@ class Container:
                         args=args,
                         kwargs=kwargs,
                         injected_parameters=injected_parameters,
-                        context_parameters=context_parameters,
                     )
                     return callable_obj(*bound_arguments.args, **bound_arguments.kwargs)
 
@@ -2372,7 +2347,6 @@ class Container:
                         args=args,
                         kwargs=kwargs,
                         injected_parameters=injected_parameters,
-                        context_parameters=context_parameters,
                     )
                     return callable_obj(*bound_arguments.args, **bound_arguments.kwargs)
 
@@ -2532,7 +2506,6 @@ class Container:
     def _normalize_dependency_identity_key(self, dependency: Any) -> Any:
         if (
             is_all_annotation(dependency)
-            or is_from_context_annotation(dependency)
             or is_maybe_annotation(dependency)
             or is_provider_annotation(dependency)
         ):
@@ -2556,7 +2529,6 @@ class Container:
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
         injected_parameters: tuple[InjectedParameter, ...],
-        context_parameters: tuple[ContextParameter, ...],
     ) -> inspect.BoundArguments:
         bound_arguments = signature.bind_partial(*args, **kwargs)
         for injected_parameter in injected_parameters:
@@ -2565,9 +2537,7 @@ class Container:
             dependency = injected_parameter.dependency
             if is_maybe_annotation(dependency):
                 inner_dependency = strip_maybe_annotation(dependency)
-                if is_provider_annotation(inner_dependency) or is_from_context_annotation(
-                    inner_dependency,
-                ):
+                if is_provider_annotation(inner_dependency):
                     bound_arguments.arguments[injected_parameter.name] = resolver.resolve(
                         dependency,
                     )
@@ -2585,12 +2555,6 @@ class Container:
                 )
                 continue
             bound_arguments.arguments[injected_parameter.name] = resolver.resolve(dependency)
-        for context_parameter in context_parameters:
-            if context_parameter.name in bound_arguments.arguments:
-                continue
-            bound_arguments.arguments[context_parameter.name] = resolver.resolve(
-                context_parameter.dependency,
-            )
         return bound_arguments
 
     async def _resolve_async_injected_arguments(
@@ -2601,7 +2565,6 @@ class Container:
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
         injected_parameters: tuple[InjectedParameter, ...],
-        context_parameters: tuple[ContextParameter, ...],
     ) -> inspect.BoundArguments:
         bound_arguments = signature.bind_partial(*args, **kwargs)
         for injected_parameter in injected_parameters:
@@ -2610,9 +2573,7 @@ class Container:
             dependency = injected_parameter.dependency
             if is_maybe_annotation(dependency):
                 inner_dependency = strip_maybe_annotation(dependency)
-                if is_provider_annotation(inner_dependency) or is_from_context_annotation(
-                    inner_dependency,
-                ):
+                if is_provider_annotation(inner_dependency):
                     bound_arguments.arguments[injected_parameter.name] = await resolver.aresolve(
                         dependency,
                     )
@@ -2631,12 +2592,6 @@ class Container:
                 continue
             bound_arguments.arguments[injected_parameter.name] = await resolver.aresolve(
                 dependency,
-            )
-        for context_parameter in context_parameters:
-            if context_parameter.name in bound_arguments.arguments:
-                continue
-            bound_arguments.arguments[context_parameter.name] = await resolver.aresolve(
-                context_parameter.dependency,
             )
         return bound_arguments
 
@@ -2671,32 +2626,6 @@ class Container:
         if INJECT_RESOLVER_KWARG in kwargs:
             return cast("ResolverProtocol", kwargs.pop(INJECT_RESOLVER_KWARG))
         return self.compile()
-
-    def _pop_inject_context(self, kwargs: dict[str, Any]) -> Mapping[Any, Any] | None:
-        if INJECT_CONTEXT_KWARG not in kwargs:
-            return None
-        context = kwargs.pop(INJECT_CONTEXT_KWARG)
-        if context is None:
-            return None
-        if isinstance(context, Mapping):
-            return context
-        msg = f"'{INJECT_CONTEXT_KWARG}' must be a mapping or None."
-        raise DIWireInvalidRegistrationError(msg)
-
-    def _validate_inject_context_usage(
-        self,
-        *,
-        context: Mapping[Any, Any] | None,
-        scope_opened: bool,
-    ) -> None:
-        if context is None or scope_opened:
-            return
-        msg = (
-            f"`{INJECT_CONTEXT_KWARG}` was provided but no new scope was opened; pass "
-            "`scope=...` to `inject(...)` or provide a resolver that was already created with "
-            "context."
-        )
-        raise DIWireInvalidRegistrationError(msg)
 
     def _build_injected_target_scope_getter(
         self,
@@ -2760,27 +2689,16 @@ class Container:
         *,
         base_resolver: ResolverProtocol,
         target_scope: BaseScope | None,
-        context: Mapping[Any, Any] | None,
-    ) -> tuple[ResolverProtocol, bool]:
+    ) -> ResolverProtocol:
         if target_scope is None:
-            return base_resolver, False
+            return base_resolver
         if target_scope.level == self._root_scope.level:
-            return base_resolver, False
+            return base_resolver
         try:
-            if context is None:
-                return base_resolver.enter_scope(target_scope), True
-            try:
-                return base_resolver.enter_scope(target_scope, context=context), True
-            except TypeError as error:
-                msg = (
-                    "Resolver does not support context-aware scope entry. "
-                    "Provide a DIWire resolver instance or omit "
-                    f"'{INJECT_CONTEXT_KWARG}'."
-                )
-                raise DIWireInvalidRegistrationError(msg) from error
+            return base_resolver.enter_scope(target_scope)
         except DIWireScopeMismatchError as error:
             if self._is_already_deep_enough_scope_error(error):
-                return base_resolver, False
+                return base_resolver
             raise
 
     @staticmethod
@@ -3151,18 +3069,14 @@ class Container:
     def enter_scope(
         self,
         scope: BaseScope | None = None,
-        *,
-        context: Mapping[Any, Any] | None = None,
     ) -> ResolverProtocol:
         """Enter a deeper scope and return a scoped resolver.
 
         When ``scope`` is ``None``, DIWire transitions to the next deeper
-        non-skippable scope. Context keys are used by ``FromContext[...]``
-        lookups and inherited by deeper nested scopes unless overridden.
+        non-skippable scope.
 
         Args:
             scope: Explicit target scope, or ``None`` for default next scope.
-            context: Optional mapping for ``FromContext[...]`` dependencies.
 
         Returns:
             Resolver bound to the target scope.
@@ -3174,11 +3088,8 @@ class Container:
         Examples:
             .. code-block:: python
 
-                with container.enter_scope(
-                    Scope.REQUEST,
-                    context={int: 1001},
-                ) as request_resolver:
-                    user_id = request_resolver.resolve(FromContext[int])
+                with container.enter_scope(Scope.REQUEST) as request_resolver:
+                    service = request_resolver.resolve(Service)
 
         """
         resolver = self._get_context_bound_resolver_or_none()
@@ -3186,7 +3097,7 @@ class Container:
             resolver = self._root_resolver
             if resolver is None:
                 resolver = self.compile()
-        return resolver.enter_scope(scope, context=context)
+        return resolver.enter_scope(scope)
 
     def __enter__(self) -> ResolverProtocol:
         """Enter the resolver context."""
