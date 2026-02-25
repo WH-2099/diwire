@@ -66,7 +66,7 @@ that reads ``ContextVar.get()``.
 
    from contextvars import ContextVar
 
-   from diwire import Container, Injected, Scope, resolver_context
+   from diwire import Container, Injected, Lifetime, Scope, resolver_context
 
    current_user_id_var: ContextVar[int] = ContextVar("current_user_id", default=0)
 
@@ -76,7 +76,12 @@ that reads ``ContextVar.get()``.
 
 
    container = Container()
-   container.add_factory(read_current_user_id, provides=int, scope=Scope.REQUEST)
+   container.add_factory(
+       read_current_user_id,
+       provides=int,
+       scope=Scope.REQUEST,
+       lifetime=Lifetime.TRANSIENT,
+   )
 
 
    @resolver_context.inject(scope=Scope.REQUEST)

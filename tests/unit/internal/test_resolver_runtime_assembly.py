@@ -723,7 +723,7 @@ def test_scope_resolver_can_directly_resolve_contextvar_backed_dependency() -> N
             current_value_var.reset(token)
 
 
-def test_scope_resolver_normalizes_non_component_metadata_for_regular_dependencies() -> None:
+def test_container_resolve_normalizes_non_component_metadata_for_regular_dependencies() -> None:
     priority_key = Annotated[int, Component("priority")]
     container = Container()
     container.add_instance(9, provides=int)

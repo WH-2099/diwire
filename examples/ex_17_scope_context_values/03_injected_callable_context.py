@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from contextvars import ContextVar
 
-from diwire import Container, Injected, Scope, resolver_context
+from diwire import Container, Injected, Lifetime, Scope, resolver_context
 
 current_value_var: ContextVar[int] = ContextVar("current_value", default=0)
 
@@ -15,7 +15,12 @@ def read_current_value() -> int:
 
 def main() -> None:
     container = Container()
-    container.add_factory(read_current_value, provides=int, scope=Scope.REQUEST)
+    container.add_factory(
+        read_current_value,
+        provides=int,
+        scope=Scope.REQUEST,
+        lifetime=Lifetime.TRANSIENT,
+    )
 
     @resolver_context.inject(scope=Scope.REQUEST)
     def handler(value: Injected[int]) -> int:

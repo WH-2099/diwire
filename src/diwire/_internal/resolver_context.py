@@ -277,7 +277,10 @@ class ResolverContext:
         """Enter a child scope on the active resolver or fallback resolver.
 
         Args:
-            scope: Target scope to enter. ``None`` keeps the current scope.
+            scope: Target scope to enter. ``None`` delegates to
+                ``_require_context_or_fallback_resolver().enter_scope(None)``,
+                so behavior follows the resolver's default transition semantics
+                (see ``ResolverProtocol.enter_scope``).
 
         Raises:
             DIWireResolverNotSetError: If no resolver is bound and no fallback

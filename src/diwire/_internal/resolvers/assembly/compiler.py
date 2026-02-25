@@ -1835,6 +1835,9 @@ def _resolver_init(
         self._cleanup_callbacks = []
         self._cleanup_callback_single = None
     self._owned_scope_resolvers = ()
+    parent_scope_level = (
+        _resolver_scope_level(parent_resolver) if parent_resolver is not None else None
+    )
 
     for scope in runtime.ordered_scopes:
         if scope.is_root:
@@ -1852,8 +1855,7 @@ def _resolver_init(
             continue
 
         ancestor_resolver = _MISSING_RESOLVER
-        if parent_resolver is not None:
-            parent_scope_level = _resolver_scope_level(parent_resolver)
+        if parent_scope_level is not None:
             if parent_scope_level == scope.scope_level:
                 ancestor_resolver = parent_resolver
             else:
