@@ -14,10 +14,8 @@ from diwire._internal.injection import INJECT_RESOLVER_KWARG, INJECT_WRAPPER_MAR
 from diwire._internal.lock_mode import LockMode
 from diwire._internal.markers import (
     is_async_provider_annotation,
-    is_from_context_annotation,
     is_maybe_annotation,
     is_provider_annotation,
-    strip_from_context_annotation,
     strip_maybe_annotation,
     strip_non_component_annotation,
     strip_provider_annotation,
@@ -724,8 +722,6 @@ class _OpenGenericResolver:  # pragma: no cover
             return _MAYBE_UNHANDLED
 
         inner_dependency = strip_maybe_annotation(dependency)
-        if is_from_context_annotation(inner_dependency):
-            return self._resolve_maybe_from_context_sync(inner_dependency)
         if not self._is_registered_dependency(inner_dependency):
             return None
         return self.resolve(inner_dependency)
@@ -735,37 +731,13 @@ class _OpenGenericResolver:  # pragma: no cover
             return _MAYBE_UNHANDLED
 
         inner_dependency = strip_maybe_annotation(dependency)
-        if is_from_context_annotation(inner_dependency):
-            return await self._resolve_maybe_from_context_async(inner_dependency)
         if not self._is_registered_dependency(inner_dependency):
             return None
         return await self.aresolve(inner_dependency)
 
-    def _resolve_maybe_from_context_sync(self, dependency: Any) -> Any | None:
-        context_key = strip_non_component_annotation(strip_from_context_annotation(dependency))
-        resolve_from_context = getattr(self._base_resolver, "_resolve_from_context", None)
-        try:
-            if callable(resolve_from_context):
-                return resolve_from_context(context_key)
-            return self._base_resolver.resolve(dependency)
-        except DIWireDependencyNotRegisteredError:
-            return None
-
-    async def _resolve_maybe_from_context_async(self, dependency: Any) -> Any | None:
-        context_key = strip_non_component_annotation(strip_from_context_annotation(dependency))
-        resolve_from_context = getattr(self._base_resolver, "_resolve_from_context", None)
-        try:
-            if callable(resolve_from_context):
-                return resolve_from_context(context_key)
-            return await self._base_resolver.aresolve(dependency)
-        except DIWireDependencyNotRegisteredError:
-            return None
-
     def enter_scope(
         self,
         scope: BaseScope | None = None,
-        *,
-        context: Mapping[Any, Any] | None = None,
     ) -> _OpenGenericResolver:
         transition_path = self._resolve_scope_transition_path_cached(
             scope=scope,
@@ -775,7 +747,7 @@ class _OpenGenericResolver:  # pragma: no cover
 
         if len(transition_path) == 1:
             next_scope = transition_path[0]
-            scoped_base_resolver = self._base_resolver.enter_scope(next_scope, context=context)
+            scoped_base_resolver = self._base_resolver.enter_scope(next_scope)
             return _OpenGenericResolver(
                 base_resolver=scoped_base_resolver,
                 registry=self._registry,
@@ -791,14 +763,8 @@ class _OpenGenericResolver:  # pragma: no cover
         current_base_resolver = self._base_resolver
         created_wrappers: list[_OpenGenericResolver] = []
 
-        for index, next_scope in enumerate(transition_path):
-            if index == len(transition_path) - 1:
-                current_base_resolver = current_base_resolver.enter_scope(
-                    next_scope,
-                    context=context,
-                )
-            else:
-                current_base_resolver = current_base_resolver.enter_scope(next_scope)
+        for next_scope in transition_path:
+            current_base_resolver = current_base_resolver.enter_scope(next_scope)
             current_wrapper = _OpenGenericResolver(
                 base_resolver=current_base_resolver,
                 registry=self._registry,

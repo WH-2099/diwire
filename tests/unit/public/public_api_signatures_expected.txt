@@ -14,10 +14,9 @@ diwire.Container.aresolve | (self, dependency: 'Any', *, on_missing: "MissingPol
 diwire.Container.close | (self, exc_type: 'type[BaseException] | None' = None, exc_value: 'BaseException | None' = None, traceback: 'TracebackType | None' = None) -> 'None'
 diwire.Container.compile | (self) -> 'ResolverProtocol'
 diwire.Container.decorate | (self, *, provides: 'Any', component: 'Component | Any | None' = None, decorator: 'Callable[..., Any]', inner_parameter: 'str | None' = None) -> 'None'
-diwire.Container.enter_scope | (self, scope: 'BaseScope | None' = None, *, context: 'Mapping[Any, Any] | None' = None) -> 'ResolverProtocol'
+diwire.Container.enter_scope | (self, scope: 'BaseScope | None' = None) -> 'ResolverProtocol'
 diwire.Container.resolve | (self, dependency: 'Any', *, on_missing: "MissingPolicy | Literal['from_container']" = 'from_container') -> 'Any'
 diwire.DependencyRegistrationPolicy | class | (*values)
-diwire.FromContext | class | ()
 diwire.Injected | class | ()
 diwire.Lifetime | class | (*values)
 diwire.LockMode | class | (*values)
@@ -26,7 +25,7 @@ diwire.MissingPolicy | class | (*values)
 diwire.Provider | class | ()
 diwire.ResolverContext | class | () -> 'None'
 diwire.ResolverContext.aresolve | (self, dependency: 'Any') -> 'Any'
-diwire.ResolverContext.enter_scope | (self, scope: 'BaseScope | None' = None, *, context: 'Mapping[Any, Any] | None' = None) -> 'ResolverProtocol'
+diwire.ResolverContext.enter_scope | (self, scope: 'BaseScope | None' = None) -> 'ResolverProtocol'
 diwire.ResolverContext.inject | (self, func: "InjectableF | Literal['from_decorator']" = 'from_decorator', *, scope: "BaseScope | Literal['infer']" = 'infer', dependency_registration_policy: "DependencyRegistrationPolicy | Literal['from_container']" = 'from_container', auto_open_scope: 'bool' = True) -> 'InjectableF | Callable[[InjectableF], InjectableF]'
 diwire.ResolverContext.resolve | (self, dependency: 'Any') -> 'Any'
 diwire.ResolverContext.set_fallback_container | (self, container: 'Container') -> 'None'
@@ -34,7 +33,7 @@ diwire.ResolverProtocol | class | (*args, **kwargs)
 diwire.ResolverProtocol.aclose | (self, exc_type: 'type[BaseException] | None' = None, exc_value: 'BaseException | None' = None, traceback: 'TracebackType | None' = None) -> 'None'
 diwire.ResolverProtocol.aresolve | (self, dependency: 'Any') -> 'Any'
 diwire.ResolverProtocol.close | (self, exc_type: 'type[BaseException] | None' = None, exc_value: 'BaseException | None' = None, traceback: 'TracebackType | None' = None) -> 'None'
-diwire.ResolverProtocol.enter_scope | (self, scope: 'BaseScope | None' = None, *, context: 'Mapping[Any, Any] | None' = None) -> 'ResolverProtocol'
+diwire.ResolverProtocol.enter_scope | (self, scope: 'BaseScope | None' = None) -> 'ResolverProtocol'
 diwire.ResolverProtocol.resolve | (self, dependency: 'Any') -> 'Any'
 diwire.Scope | object | <not-callable>
 diwire.resolver_context | object | <not-callable>

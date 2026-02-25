@@ -14,17 +14,15 @@ from dataclasses import dataclass
 from types import CodeType, TracebackType
 from typing import Any, Final, Literal, cast
 
-from diwire._internal.injection import INJECT_CONTEXT_KWARG, INJECT_RESOLVER_KWARG
+from diwire._internal.injection import INJECT_RESOLVER_KWARG
 from diwire._internal.lock_mode import LockMode
 from diwire._internal.markers import (
     component_base_key,
     is_all_annotation,
     is_async_provider_annotation,
-    is_from_context_annotation,
     is_maybe_annotation,
     is_provider_annotation,
     strip_all_annotation,
-    strip_from_context_annotation,
     strip_maybe_annotation,
     strip_non_component_annotation,
     strip_provider_annotation,
@@ -85,7 +83,6 @@ class _ResolverRuntime:
     dep_eq_slot_by_key: dict[Any, int]
     dep_type_by_slot: dict[int, Any]
     provider_by_slot: dict[int, Any]
-    context_key_by_name: dict[str, Any]
     thread_lock_by_slot: dict[int, threading.Lock]
     async_lock_by_slot: dict[int, asyncio.Lock]
     cache_slots_by_owner_level: dict[int, tuple[int, ...]]
@@ -127,9 +124,9 @@ class ResolversAssemblyCompiler:
 
         root_class = runtime.class_by_level[runtime.root_scope_level]
         if runtime.has_cleanup:
-            root_resolver = root_class(cleanup_enabled, None, None)
+            root_resolver = root_class(cleanup_enabled, None)
         else:
-            root_resolver = root_class(None, None)
+            root_resolver = root_class(None)
         return cast("ResolverProtocol", root_resolver)
 
     def _log_plan_strategy(self, *, plan: ResolverGenerationPlan) -> None:
@@ -167,7 +164,6 @@ class ResolversAssemblyCompiler:
         dep_eq_slot_by_key: dict[Any, int] = {}
         dep_type_by_slot: dict[int, Any] = {}
         provider_by_slot: dict[int, Any] = {}
-        context_key_by_name: dict[str, Any] = {}
 
         for workflow in plan.workflows:
             registration = registrations.get_by_slot(workflow.slot)
@@ -184,20 +180,6 @@ class ResolversAssemblyCompiler:
 
             if workflow.dispatch_kind == "equality_map":
                 dep_eq_slot_by_key[dep_type] = workflow.slot
-
-            for dependency_plan in _dependency_plans_for_workflow(workflow=workflow):
-                if dependency_plan.kind != "context":
-                    continue
-                context_key_name = dependency_plan.ctx_key_global_name
-                if context_key_name is None:
-                    continue
-                context_key_by_name[context_key_name] = strip_from_context_annotation(
-                    strip_non_component_annotation(
-                        strip_maybe_annotation(
-                            registration.dependencies[dependency_plan.dependency_index].provides,
-                        ),
-                    ),
-                )
 
         all_slots_by_key = {key: tuple(slots) for key, slots in all_slots_by_key_mut.items()}
 
@@ -270,7 +252,6 @@ class ResolversAssemblyCompiler:
             dep_eq_slot_by_key=dep_eq_slot_by_key,
             dep_type_by_slot=dep_type_by_slot,
             provider_by_slot=provider_by_slot,
-            context_key_by_name=context_key_by_name,
             thread_lock_by_slot=thread_lock_by_slot,
             async_lock_by_slot=async_lock_by_slot,
             cache_slots_by_owner_level=cache_slots_by_owner_level,
@@ -286,7 +267,6 @@ class ResolversAssemblyCompiler:
             "_MISSING_DEP_SLOT": _MISSING_DEP_SLOT,
             "_resolver_init": _resolver_init,
             "_resolver_enter_scope": _resolver_enter_scope,
-            "_resolver_resolve_from_context": _resolver_resolve_from_context,
             "_resolver_is_registered_dependency": _resolver_is_registered_dependency,
             "_resolver_exit": _resolver_exit,
             "_resolver_aexit": _resolver_aexit,
@@ -298,11 +278,9 @@ class ResolversAssemblyCompiler:
             "DIWireScopeMismatchError": DIWireScopeMismatchError,
             "is_async_provider_annotation": is_async_provider_annotation,
             "is_all_annotation": is_all_annotation,
-            "is_from_context_annotation": is_from_context_annotation,
             "is_maybe_annotation": is_maybe_annotation,
             "is_provider_annotation": is_provider_annotation,
             "strip_all_annotation": strip_all_annotation,
-            "strip_from_context_annotation": strip_from_context_annotation,
             "strip_maybe_annotation": strip_maybe_annotation,
             "strip_non_component_annotation": strip_non_component_annotation,
             "strip_provider_annotation": strip_provider_annotation,
@@ -326,7 +304,6 @@ class ResolversAssemblyCompiler:
         generated_globals.update(
             {f"_scope_obj_{level}": scope for level, scope in runtime.scope_obj_by_level.items()},
         )
-        generated_globals.update(runtime.context_key_by_name)
 
         return generated_globals
 
@@ -367,23 +344,6 @@ class ResolversAssemblyCompiler:
                 class_plan=scope,
                 generated_globals=generated_globals,
                 is_async=True,
-            )
-            attrs["_resolve_from_context"] = self._compile_simple_method(
-                name="_resolve_from_context",
-                arg_names=("self", "key"),
-                body=[
-                    ast.Return(
-                        value=ast.Call(
-                            func=ast.Name(id="_resolver_resolve_from_context", ctx=ast.Load()),
-                            args=[
-                                ast.Name(id="self", ctx=ast.Load()),
-                                ast.Name(id="key", ctx=ast.Load()),
-                            ],
-                            keywords=[],
-                        ),
-                    ),
-                ],
-                generated_globals=generated_globals,
             )
             attrs["_is_registered_dependency"] = self._compile_simple_method(
                 name="_is_registered_dependency",
@@ -470,8 +430,6 @@ class ResolversAssemblyCompiler:
     ) -> tuple[str, ...]:
         slots: list[str] = [
             "_root_resolver",
-            "_context",
-            "_parent_context_resolver",
             "_owned_scope_resolvers",
             "_active",
         ]
@@ -562,8 +520,8 @@ class ResolversAssemblyCompiler:
         defaults: tuple[Any, ...]
         body: list[ast.stmt]
         if class_plan.is_root:
-            arg_names = ("self", "cleanup_enabled", "context", "parent_context_resolver")
-            defaults = (True, None, None)
+            arg_names = ("self", "cleanup_enabled", "parent_resolver")
+            defaults = (True, None)
             body = [
                 ast.Expr(
                     value=ast.Call(
@@ -572,8 +530,7 @@ class ResolversAssemblyCompiler:
                             ast.Name(id="self", ctx=ast.Load()),
                             ast.Constant(value=None),
                             ast.Name(id="cleanup_enabled", ctx=ast.Load()),
-                            ast.Name(id="context", ctx=ast.Load()),
-                            ast.Name(id="parent_context_resolver", ctx=ast.Load()),
+                            ast.Name(id="parent_resolver", ctx=ast.Load()),
                         ],
                         keywords=[],
                     ),
@@ -584,10 +541,9 @@ class ResolversAssemblyCompiler:
                 "self",
                 "root_resolver",
                 "cleanup_enabled",
-                "context",
-                "parent_context_resolver",
+                "parent_resolver",
             )
-            defaults = (True, None, None)
+            defaults = (True, None)
             body = [
                 ast.Expr(
                     value=ast.Call(
@@ -596,8 +552,7 @@ class ResolversAssemblyCompiler:
                             ast.Name(id="self", ctx=ast.Load()),
                             ast.Name(id="root_resolver", ctx=ast.Load()),
                             ast.Name(id="cleanup_enabled", ctx=ast.Load()),
-                            ast.Name(id="context", ctx=ast.Load()),
-                            ast.Name(id="parent_context_resolver", ctx=ast.Load()),
+                            ast.Name(id="parent_resolver", ctx=ast.Load()),
                         ],
                         keywords=[],
                     ),
@@ -637,8 +592,6 @@ class ResolversAssemblyCompiler:
 
         body_lines: list[str] = [
             f"self._root_resolver = {'self' if class_plan.is_root else 'root_resolver'}",
-            "self._context = context",
-            "self._parent_context_resolver = parent_context_resolver",
             "self._owned_scope_resolvers = ()",
             "self._active = True",
         ]
@@ -664,9 +617,8 @@ class ResolversAssemblyCompiler:
             body_lines.extend(
                 [
                     (
-                        "parent_scope_level = ("
-                        "type(parent_context_resolver)._class_plan.scope_level "
-                        "if parent_context_resolver is not None else None)"
+                        "parent_scope_level = (type(parent_resolver)._class_plan.scope_level "
+                        "if parent_resolver is not None else None)"
                     ),
                 ],
             )
@@ -683,11 +635,11 @@ class ResolversAssemblyCompiler:
                         f"elif parent_scope_level == {runtime.root_scope_level}:",
                         f"    self.{non_root_scope.resolver_attr_name} = _MISSING_RESOLVER",
                         f"elif parent_scope_level == {non_root_scope.scope_level}:",
-                        f"    self.{non_root_scope.resolver_attr_name} = parent_context_resolver",
+                        f"    self.{non_root_scope.resolver_attr_name} = parent_resolver",
                         "else:",
                         (
                             f"    self.{non_root_scope.resolver_attr_name} = getattr("
-                            f"parent_context_resolver, '{non_root_scope.resolver_attr_name}', "
+                            f"parent_resolver, '{non_root_scope.resolver_attr_name}', "
                             "_MISSING_RESOLVER)"
                         ),
                     ],
@@ -704,9 +656,9 @@ class ResolversAssemblyCompiler:
                         (
                             f"self._scope_resolver_{non_root_scope.scope_level} = _scope_class("
                             + (
-                                "self, cleanup_enabled, None, None)"
+                                "self, cleanup_enabled, self)"
                                 if runtime.has_cleanup
-                                else "self, None, None)"
+                                else "self, self)"
                             )
                         ),
                         f"self._scope_resolver_{non_root_scope.scope_level}._active = False",
@@ -717,13 +669,13 @@ class ResolversAssemblyCompiler:
             return _compile_function_from_source(
                 name="__init__",
                 arg_names=(
-                    ("self", "cleanup_enabled", "context", "parent_context_resolver")
+                    ("self", "cleanup_enabled", "parent_resolver")
                     if runtime.has_cleanup
-                    else ("self", "context", "parent_context_resolver")
+                    else ("self", "parent_resolver")
                 ),
                 body_lines=body_lines,
                 generated_globals=generated_globals,
-                defaults=((True, None, None) if runtime.has_cleanup else (None, None)),
+                defaults=((True, None) if runtime.has_cleanup else (None,)),
             )
 
         return _compile_function_from_source(
@@ -733,15 +685,14 @@ class ResolversAssemblyCompiler:
                     "self",
                     "root_resolver",
                     "cleanup_enabled",
-                    "context",
-                    "parent_context_resolver",
+                    "parent_resolver",
                 )
                 if runtime.has_cleanup
-                else ("self", "root_resolver", "context", "parent_context_resolver")
+                else ("self", "root_resolver", "parent_resolver")
             ),
             body_lines=body_lines,
             generated_globals=generated_globals,
-            defaults=((True, None, None) if runtime.has_cleanup else (None, None)),
+            defaults=((True, None) if runtime.has_cleanup else (None,)),
         )
 
     def _compile_enter_scope_method(
@@ -761,12 +712,12 @@ class ResolversAssemblyCompiler:
 
         arguments = ast.arguments(
             posonlyargs=[],
-            args=[ast.arg(arg="self"), ast.arg(arg="scope"), ast.arg(arg="context")],
+            args=[ast.arg(arg="self"), ast.arg(arg="scope")],
             vararg=None,
             kwonlyargs=[],
             kw_defaults=[],
             kwarg=None,
-            defaults=[ast.Constant(value=None), ast.Constant(value=None)],
+            defaults=[ast.Constant(value=None)],
         )
         body = [
             ast.Return(
@@ -775,7 +726,6 @@ class ResolversAssemblyCompiler:
                     args=[
                         ast.Name(id="self", ctx=ast.Load()),
                         ast.Name(id="scope", ctx=ast.Load()),
-                        ast.Name(id="context", ctx=ast.Load()),
                     ],
                     keywords=[],
                 ),
@@ -786,7 +736,7 @@ class ResolversAssemblyCompiler:
             arguments=arguments,
             body=body,
             generated_globals=generated_globals,
-            defaults=(None, None),
+            defaults=(None,),
         )
 
     def _compile_specialized_enter_scope_method(
@@ -812,32 +762,28 @@ class ResolversAssemblyCompiler:
         if runtime.uses_stateless_scope_reuse:
             transition_lines.extend(
                 [
-                    "if context is None and self._context is None and self._parent_context_resolver is None:",
-                    f"    return self._root_resolver._scope_resolver_{target_level}",
+                    f"return self._root_resolver._scope_resolver_{target_level}",
                 ],
             )
         elif class_plan.is_root:
             pooled_lines = [
-                "if context is None and self._context is None and self._parent_context_resolver is None:",
-                f"    _pooled = self._scope_resolver_{target_level}",
-                "    if not _pooled._active:",
-                "        _pooled._context = None",
-                "        _pooled._parent_context_resolver = self",
-                "        _pooled._owned_scope_resolvers = ()",
+                f"_pooled = self._scope_resolver_{target_level}",
+                "if not _pooled._active:",
+                "    _pooled._owned_scope_resolvers = ()",
             ]
             if runtime.has_cleanup:
                 pooled_lines.extend(
                     [
-                        "        _pooled._cleanup_enabled = self._cleanup_enabled",
-                        "        _pooled._cleanup_callback_single = None",
+                        "    _pooled._cleanup_enabled = self._cleanup_enabled",
+                        "    _pooled._cleanup_callback_single = None",
                     ],
                 )
             for cache_slot in runtime.cache_slots_by_owner_level.get(target_level, ()):
-                pooled_lines.append(f"        _pooled._cache_{cache_slot} = _MISSING_CACHE")
+                pooled_lines.append(f"    _pooled._cache_{cache_slot} = _MISSING_CACHE")
             pooled_lines.extend(
                 [
-                    "        _pooled._active = True",
-                    "        return _pooled",
+                    "    _pooled._active = True",
+                    "    return _pooled",
                 ],
             )
             transition_lines.extend(pooled_lines)
@@ -847,9 +793,9 @@ class ResolversAssemblyCompiler:
                     (
                         f"return _scope_ctor_{target_level}("
                         + (
-                            f"{root_resolver_expression}, self._cleanup_enabled, context, self)"
+                            f"{root_resolver_expression}, self._cleanup_enabled, self)"
                             if runtime.has_cleanup
-                            else f"{root_resolver_expression}, context, self)"
+                            else f"{root_resolver_expression}, self)"
                         )
                     )
                     if class_plan.is_root
@@ -862,9 +808,9 @@ class ResolversAssemblyCompiler:
                         (
                             "return _scope_class("
                             + (
-                                f"{root_resolver_expression}, self._cleanup_enabled, context, self)"
+                                f"{root_resolver_expression}, self._cleanup_enabled, self)"
                                 if runtime.has_cleanup
-                                else f"{root_resolver_expression}, context, self)"
+                                else f"{root_resolver_expression}, self)"
                             )
                         ),
                     ]
@@ -877,15 +823,15 @@ class ResolversAssemblyCompiler:
             *[f"    {line}" for line in transition_lines],
             "if scope is None:",
             *[f"    {line}" for line in transition_lines],
-            "return _resolver_enter_scope(self, scope, context)",
+            "return _resolver_enter_scope(self, scope)",
         ]
 
         return _compile_function_from_source(
             name="enter_scope",
-            arg_names=("self", "scope", "context"),
+            arg_names=("self", "scope"),
             body_lines=body_lines,
             generated_globals=generated_globals,
-            defaults=(None, None),
+            defaults=(None,),
         )
 
     def _compile_dispatch_method(
@@ -1708,11 +1654,6 @@ class ResolversAssemblyCompiler:
                 if dependency_plan.provider_is_async
                 else f"lambda: self.resolve_{provider_inner_slot}()"
             )
-        if dependency_plan.kind == "context":
-            context_key_name = dependency_plan.ctx_key_global_name
-            if context_key_name is None:
-                return _FALLBACK_ARGUMENT_EXPRESSION
-            return f"self._resolve_from_context({context_key_name})"
         if dependency_plan.kind == "all":
             slots = dependency_plan.all_slots
             if not slots:
@@ -1873,8 +1814,7 @@ def _resolver_init(
     self: Any,
     root_resolver: Any,
     cleanup_enabled: bool,
-    context: Any | None,
-    parent_context_resolver: Any,
+    parent_resolver: Any,
 ) -> None:
     runtime = type(self)._runtime
     class_plan = type(self)._class_plan
@@ -1884,8 +1824,6 @@ def _resolver_init(
     else:
         self._root_resolver = root_resolver
 
-    self._context = context
-    self._parent_context_resolver = parent_context_resolver
     self._active = True
     if hasattr(self, "_last_sync_dependency"):
         self._last_sync_dependency = _MISSING_DEP_SLOT
@@ -1914,13 +1852,13 @@ def _resolver_init(
             continue
 
         ancestor_resolver = _MISSING_RESOLVER
-        if parent_context_resolver is not None:
-            parent_scope_level = _resolver_scope_level(parent_context_resolver)
+        if parent_resolver is not None:
+            parent_scope_level = _resolver_scope_level(parent_resolver)
             if parent_scope_level == scope.scope_level:
-                ancestor_resolver = parent_context_resolver
+                ancestor_resolver = parent_resolver
             else:
                 ancestor_resolver = getattr(
-                    parent_context_resolver,
+                    parent_resolver,
                     attr_name,
                     _MISSING_RESOLVER,
                 )
@@ -1938,14 +1876,12 @@ def _resolver_init(
                 scope_resolver = scope_class(
                     self,
                     cleanup_enabled,
-                    None,
-                    None,
+                    self,
                 )
             else:
                 scope_resolver = scope_class(
                     self,
-                    None,
-                    None,
+                    self,
                 )
             scope_resolver._active = False
             setattr(self, f"_scope_resolver_{scope.scope_level}", scope_resolver)
@@ -1954,7 +1890,6 @@ def _resolver_init(
 def _resolver_enter_scope(
     self: Any,
     scope: Any | None,
-    context: Mapping[Any, Any] | None,
 ) -> Any:
     runtime = type(self)._runtime
     class_plan = type(self)._class_plan
@@ -1972,7 +1907,6 @@ def _resolver_enter_scope(
             runtime=runtime,
             current_resolver=self,
             target_scope=default_next,
-            context=context,
         )
 
     default_scope_obj = runtime.scope_obj_by_level.get(default_next.scope_level)
@@ -1981,7 +1915,6 @@ def _resolver_enter_scope(
             runtime=runtime,
             current_resolver=self,
             target_scope=default_next,
-            context=context,
         )
 
     target_scope_level = runtime.scope_level_by_scope_id.get(id(scope), scope)
@@ -2003,22 +1936,7 @@ def _resolver_enter_scope(
 
     if runtime.uses_stateless_scope_reuse:
         target_level = int(target_scope_level)
-        if context is None and self._context is None and self._parent_context_resolver is None:
-            return getattr(self._root_resolver, f"_scope_resolver_{target_level}")
-
-        target_class = runtime.class_by_level[target_level]
-        if runtime.has_cleanup:
-            return target_class(
-                self._root_resolver,
-                self._cleanup_enabled,
-                context,
-                self,
-            )
-        return target_class(
-            self._root_resolver,
-            context,
-            self,
-        )
+        return getattr(self._root_resolver, f"_scope_resolver_{target_level}")
 
     transition_plan = _build_transition_plan_to_target(
         runtime=runtime,
@@ -2031,7 +1949,6 @@ def _resolver_enter_scope(
             runtime=runtime,
             current_resolver=self,
             target_scope=transition_plan[0],
-            context=context,
         )
 
     root_resolver = self if class_plan.is_root else self._root_resolver
@@ -2039,20 +1956,17 @@ def _resolver_enter_scope(
     created_resolvers: list[Any] = []
     cleanup_enabled = getattr(self, "_cleanup_enabled", True)
 
-    for index, scope_plan in enumerate(transition_plan):
+    for scope_plan in transition_plan:
         target_class = runtime.class_by_level[scope_plan.scope_level]
-        nested_context = context if index == len(transition_plan) - 1 else None
         if runtime.has_cleanup:
             next_resolver = target_class(
                 root_resolver,
                 cleanup_enabled,
-                nested_context,
                 current_resolver,
             )
         else:
             next_resolver = target_class(
                 root_resolver,
-                nested_context,
                 current_resolver,
             )
         created_resolvers.append(next_resolver)
@@ -2068,14 +1982,8 @@ def _instantiate_scope_transition(
     runtime: _ResolverRuntime,
     current_resolver: Any,
     target_scope: ScopePlan,
-    context: Mapping[Any, Any] | None,
 ) -> Any:
-    if (
-        runtime.uses_stateless_scope_reuse
-        and context is None
-        and current_resolver._context is None
-        and current_resolver._parent_context_resolver is None
-    ):
+    if runtime.uses_stateless_scope_reuse:
         return getattr(
             current_resolver._root_resolver,
             f"_scope_resolver_{target_scope.scope_level}",
@@ -2090,12 +1998,10 @@ def _instantiate_scope_transition(
         return target_class(
             root_resolver,
             current_resolver._cleanup_enabled,
-            context,
             current_resolver,
         )
     return target_class(
         root_resolver,
-        context,
         current_resolver,
     )
 
@@ -2141,26 +2047,6 @@ def _build_transition_plan_to_target(
         current_scope_level = next_scope.scope_level
 
     return tuple(transition_plan)
-
-
-def _resolver_resolve_from_context(self: Any, key: Any) -> Any:
-    context = self._context
-    if context is not None and key in context:
-        return context[key]
-
-    parent_context_resolver = self._parent_context_resolver
-    while parent_context_resolver is not None:
-        parent_context = parent_context_resolver._context
-        if parent_context is not None and key in parent_context:
-            return parent_context[key]
-        parent_context_resolver = parent_context_resolver._parent_context_resolver
-
-    msg = (
-        f"Context value for {key!r} is not provided. Pass it via "
-        "`enter_scope(..., context={...})` (or "
-        f"`{INJECT_CONTEXT_KWARG}` for injected callables)."
-    )
-    raise DIWireDependencyNotRegisteredError(msg)
 
 
 def _resolver_is_registered_dependency(self: Any, dependency: Any) -> bool:
@@ -2468,13 +2354,6 @@ def _resolve_dispatch_fallback_sync(self: Any, dependency: Any) -> Any:
                 return lambda: self.aresolve(provider_inner)
             return lambda: self.resolve(provider_inner)
 
-        if is_from_context_annotation(inner):
-            key = strip_non_component_annotation(strip_from_context_annotation(inner))
-            try:
-                return self._resolve_from_context(key)
-            except DIWireDependencyNotRegisteredError:
-                return None
-
         if not self._is_registered_dependency(inner):
             return None
         try:
@@ -2493,10 +2372,6 @@ def _resolve_dispatch_fallback_sync(self: Any, dependency: Any) -> Any:
         if is_async_provider_annotation(dependency):
             return lambda: self.aresolve(inner)
         return lambda: self.resolve(inner)
-
-    if is_from_context_annotation(dependency):
-        key = strip_non_component_annotation(strip_from_context_annotation(dependency))
-        return self._resolve_from_context(key)
 
     if is_all_annotation(dependency):
         runtime = type(self)._runtime
@@ -2531,13 +2406,6 @@ def _resolve_dispatch_fallback_async(self: Any, dependency: Any) -> Awaitable[An
                     return lambda: self.aresolve(provider_inner)
                 return lambda: self.resolve(provider_inner)
 
-            if is_from_context_annotation(inner):
-                key = strip_non_component_annotation(strip_from_context_annotation(inner))
-                try:
-                    return self._resolve_from_context(key)
-                except DIWireDependencyNotRegisteredError:
-                    return None
-
             if not self._is_registered_dependency(inner):
                 return None
             try:
@@ -2556,10 +2424,6 @@ def _resolve_dispatch_fallback_async(self: Any, dependency: Any) -> Awaitable[An
             if is_async_provider_annotation(dependency):
                 return lambda: self.aresolve(inner)
             return lambda: self.resolve(inner)
-
-        if is_from_context_annotation(dependency):
-            key = strip_non_component_annotation(strip_from_context_annotation(dependency))
-            return self._resolve_from_context(key)
 
         if is_all_annotation(dependency):
             runtime = type(self)._runtime
@@ -3233,14 +3097,6 @@ def _resolve_dependency_value_sync(
             return lambda: getattr(resolver, f"aresolve_{provider_inner_slot}")()
         return lambda: getattr(resolver, f"resolve_{provider_inner_slot}")()
 
-    if dependency_plan.kind == "context":
-        context_key_name = dependency_plan.ctx_key_global_name
-        if context_key_name is None:
-            msg = "Missing context key global name for context dependency plan."
-            raise ValueError(msg)
-        context_key = runtime.context_key_by_name[context_key_name]
-        return resolver._resolve_from_context(context_key)
-
     if dependency_plan.kind == "all":
         if not dependency_plan.all_slots:
             return ()
@@ -3291,14 +3147,6 @@ def _resolve_dependency_value_async(
             if dependency_plan.provider_is_async:
                 return lambda: getattr(resolver, f"aresolve_{provider_inner_slot}")()
             return lambda: getattr(resolver, f"resolve_{provider_inner_slot}")()
-
-        if dependency_plan.kind == "context":
-            context_key_name = dependency_plan.ctx_key_global_name
-            if context_key_name is None:
-                msg = "Missing context key global name for context dependency plan."
-                raise ValueError(msg)
-            context_key = runtime.context_key_by_name[context_key_name]
-            return resolver._resolve_from_context(context_key)
 
         if dependency_plan.kind == "all":
             if not dependency_plan.all_slots:
@@ -3602,7 +3450,7 @@ def _dependency_plans_for_workflow(
         resolved_slot = slot if slot is not None and slot >= 0 else None
         fallback_plans.append(
             ProviderDependencyPlan(
-                kind="provider" if resolved_slot is not None else "context",
+                kind="provider",
                 dependency=dependency,
                 dependency_index=dependency_index,
                 dependency_slot=resolved_slot,

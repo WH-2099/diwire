@@ -13,7 +13,6 @@ from diwire._internal.markers import (
     component_base_key,
     is_all_annotation,
     is_async_provider_annotation,
-    is_from_context_annotation,
     is_maybe_annotation,
     is_provider_annotation,
     strip_all_annotation,
@@ -32,7 +31,7 @@ from diwire._internal.type_checks import is_runtime_class
 from diwire.exceptions import DIWireDependencyNotRegisteredError, DIWireInvalidProviderSpecError
 
 DispatchKind = Literal["identity", "equality_map"]
-DependencyPlanKind = Literal["provider", "context", "provider_handle", "all", "literal", "omit"]
+DependencyPlanKind = Literal["provider", "provider_handle", "all", "literal", "omit"]
 _DATACLASS_DEFAULT_FACTORY_SENTINEL: Any = getattr(
     dataclasses,
     "_HAS_DEFAULT_FACTORY",
@@ -157,7 +156,6 @@ class ProviderDependencyPlan:
     dependency_index: int
     dependency_slot: int | None = None
     dependency_requires_async: bool = False
-    ctx_key_global_name: str | None = None
     provider_inner_slot: int | None = None
     provider_is_async: bool = False
     all_slots: tuple[int, ...] = ()
@@ -409,12 +407,6 @@ class ResolverGenerationPlanner:
         dependency: ProviderDependency,
     ) -> tuple[ProviderDependencyPlan, int | None, bool, str, str]:
         optional, dependency_key = self._split_maybe_dependency(dependency.provides)
-        if is_from_context_annotation(dependency_key):
-            return self._plan_context_dependency(
-                provider_slot=spec.slot,
-                dependency_index=dependency_index,
-                dependency=dependency,
-            )
         if is_provider_annotation(dependency_key):
             return self._plan_provider_handle_dependency(
                 spec=spec,
@@ -435,29 +427,6 @@ class ResolverGenerationPlanner:
             dependency_key=dependency_key,
             optional=optional,
         )
-
-    def _plan_context_dependency(
-        self,
-        *,
-        provider_slot: int,
-        dependency_index: int,
-        dependency: ProviderDependency,
-    ) -> tuple[ProviderDependencyPlan, int | None, bool, str, str]:
-        ctx_key_global_name = f"_ctx_{provider_slot}_{dependency_index}_key"
-        plan = ProviderDependencyPlan(
-            kind="context",
-            dependency=dependency,
-            dependency_index=dependency_index,
-            dependency_slot=None,
-            dependency_requires_async=False,
-            ctx_key_global_name=ctx_key_global_name,
-        )
-        expression = f"self._resolve_from_context({ctx_key_global_name})"
-        argument = self._format_dependency_argument_for_expression(
-            dependency=dependency,
-            expression=expression,
-        )
-        return plan, None, False, argument, argument
 
     def _plan_provider_handle_dependency(
         self,
@@ -751,9 +720,7 @@ class ResolverGenerationPlanner:
         requiring_provider: Any,
     ) -> tuple[int, ...]:
         optional, dependency_key = self._split_maybe_dependency(dependency.provides)
-        if is_from_context_annotation(dependency_key) or is_provider_annotation(
-            dependency_key,
-        ):
+        if is_provider_annotation(dependency_key):
             return ()
         if is_all_annotation(dependency_key):
             inner = strip_non_component_annotation(strip_all_annotation(dependency_key))

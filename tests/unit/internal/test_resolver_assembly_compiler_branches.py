@@ -10,7 +10,7 @@ from typing import Annotated, Any, cast
 
 import pytest
 
-from diwire import All, AsyncProvider, Container, FromContext, Lifetime, Maybe, Provider, Scope
+from diwire import All, AsyncProvider, Container, Lifetime, Maybe, Provider, Scope
 from diwire._internal.lock_mode import LockMode
 from diwire._internal.providers import ProviderDependency
 from diwire._internal.resolvers.assembly import compiler as compiler_module
@@ -156,7 +156,6 @@ def _runtime(
     dep_type_by_slot: dict[int, Any] | None = None,
     all_slots_by_key: dict[Any, tuple[int, ...]] | None = None,
     dep_eq_slot_by_key: dict[Any, int] | None = None,
-    context_key_by_name: dict[str, Any] | None = None,
     uses_stateless_scope_reuse: bool = False,
 ) -> compiler_module._ResolverRuntime:
     plan = _generation_plan(
@@ -218,7 +217,6 @@ def _runtime(
         provider_by_slot={workflow.slot: object() for workflow in workflows}
         if provider_by_slot is None
         else provider_by_slot,
-        context_key_by_name={} if context_key_by_name is None else context_key_by_name,
         thread_lock_by_slot={
             workflow.slot: threading.Lock() for workflow in workflows if workflow.uses_thread_lock
         },
@@ -260,7 +258,7 @@ def test_compiler_enter_scope_error_and_deep_chain_branches() -> None:
     with pytest.raises(DIWireScopeMismatchError, match="not a valid next transition"):
         root.enter_scope(999)
 
-    deep = root.enter_scope(Scope.STEP, context={int: 1})
+    deep = root.enter_scope(Scope.STEP)
     assert deep._owned_scope_resolvers
 
 
@@ -279,8 +277,8 @@ def test_compiler_stateless_scope_reuse_branches() -> None:
     reused = root.enter_scope(Scope.SESSION)
     assert reused is root._scope_resolver_2
 
-    contextual = root.enter_scope(Scope.REQUEST, context={int: 1})
-    assert contextual is not root._scope_resolver_3
+    explicit = root.enter_scope(Scope.REQUEST)
+    assert explicit is root._scope_resolver_3
 
 
 def test_resolver_exit_captures_owned_scope_errors() -> None:
@@ -337,12 +335,6 @@ async def test_dispatch_fallback_async_and_sync_branches() -> None:
         def _is_registered_dependency(self, dependency: Any) -> bool:
             return dependency is int
 
-        def _resolve_from_context(self, key: Any) -> Any:
-            if key in self.context:
-                return self.context[key]
-            msg = "missing"
-            raise DIWireDependencyNotRegisteredError(msg)
-
     resolver = _Resolver()
 
     sync_provider = compiler_module._resolve_dispatch_fallback_sync(resolver, Provider[int])
@@ -354,16 +346,6 @@ async def test_dispatch_fallback_async_and_sync_branches() -> None:
     )
     assert callable(async_provider)
 
-    assert (
-        compiler_module._resolve_dispatch_fallback_sync(resolver, Maybe[FromContext[int]]) is None
-    )
-    assert (
-        await compiler_module._resolve_dispatch_fallback_async(
-            resolver,
-            Maybe[FromContext[int]],
-        )
-        is None
-    )
     assert compiler_module._resolve_dispatch_fallback_sync(resolver, Maybe[str]) is None
     assert await compiler_module._resolve_dispatch_fallback_async(resolver, Maybe[str]) is None
 
@@ -442,12 +424,6 @@ def test_argument_and_dependency_error_branches() -> None:
         dependency=dependency,
         dependency_index=0,
     )
-    missing_context = ProviderDependencyPlan(
-        kind="context",
-        dependency=dependency,
-        dependency_index=0,
-        ctx_key_global_name=None,
-    )
     missing_slot = ProviderDependencyPlan(
         kind="provider",
         dependency=dependency,
@@ -465,12 +441,6 @@ def test_argument_and_dependency_error_branches() -> None:
             runtime=runtime,
             resolver=SimpleNamespace(),
             dependency_plan=missing_handle,
-        )
-    with pytest.raises(ValueError, match="context key global name"):
-        compiler_module._resolve_dependency_value_sync(
-            runtime=runtime,
-            resolver=SimpleNamespace(),
-            dependency_plan=missing_context,
         )
     with pytest.raises(ValueError, match="missing dependency slot"):
         compiler_module._resolve_dependency_value_sync(
@@ -604,12 +574,12 @@ def test_dependency_plans_fallback_and_unique_ordered() -> None:
 
     plans = compiler_module._dependency_plans_for_workflow(workflow=fallback_workflow)
     assert plans[0].kind == "provider"
-    assert plans[1].kind == "context"
+    assert plans[1].kind == "provider"
 
     assert compiler_module._unique_ordered(["a", "a", "b"]) == ["a", "b"]
 
 
-def test_bootstrap_runtime_handles_missing_context_key_name() -> None:
+def test_bootstrap_runtime_omits_context_key_mapping_state() -> None:
     container = Container()
     container.add_instance(1, provides=int)
     registrations = container._providers_registrations
@@ -619,14 +589,7 @@ def test_bootstrap_runtime_handles_missing_context_key_name() -> None:
     workflow = _workflow_plan(
         slot=slot,
         provides=int,
-        dependency_plans=(
-            ProviderDependencyPlan(
-                kind="context",
-                dependency=_dependency(provides=FromContext[int]),
-                dependency_index=0,
-                ctx_key_global_name=None,
-            ),
-        ),
+        dependency_plans=(),
     )
     plan = _generation_plan(
         scopes=(_scope_plan(level=1, name="app"),),
@@ -636,47 +599,8 @@ def test_bootstrap_runtime_handles_missing_context_key_name() -> None:
     runtime = compiler._bootstrap_runtime(
         plan=plan, registrations=registrations, root_scope=Scope.APP
     )
-    assert runtime.context_key_by_name == {}
-
-
-def test_bootstrap_runtime_normalizes_context_key_metadata() -> None:
-    def build(value: FromContext[Annotated[int, "meta"]]) -> int:
-        return value
-
-    container = Container()
-    container.add_factory(
-        build,
-        provides=int,
-        scope=Scope.REQUEST,
-        lifetime=Lifetime.TRANSIENT,
-    )
-    registrations = container._providers_registrations
-    compiler = compiler_module.ResolversAssemblyCompiler()
-    slot = registrations.get_by_type(int).slot
-
-    workflow = _workflow_plan(
-        slot=slot,
-        provides=int,
-        dependency_plans=(
-            ProviderDependencyPlan(
-                kind="context",
-                dependency=_dependency(provides=FromContext[Annotated[int, "meta"]]),
-                dependency_index=0,
-                ctx_key_global_name="_ctx_0_0_key",
-            ),
-        ),
-    )
-    plan = _generation_plan(
-        scopes=(_scope_plan(level=1, name="app"),),
-        workflows=(workflow,),
-    )
-
-    runtime = compiler._bootstrap_runtime(
-        plan=plan,
-        registrations=registrations,
-        root_scope=Scope.APP,
-    )
-    assert runtime.context_key_by_name["_ctx_0_0_key"] is int
+    assert runtime.dep_type_by_slot[slot] is int
+    assert not hasattr(runtime, "context_key_by_name")
 
 
 def test_awaitable_in_sync_raises_for_awaitable_values() -> None:
@@ -895,8 +819,6 @@ async def test_async_slot_impl_uncovered_branches() -> None:
     resolver_mismatch = resolver_type()
     resolver_mismatch._root_resolver = SimpleNamespace()
     resolver_mismatch._cleanup_enabled = True
-    resolver_mismatch._context = None
-    resolver_mismatch._parent_context_resolver = None
 
     with pytest.raises(DIWireScopeMismatchError):
         await compiler_module._build_async_slot_impl(workflow=mismatch_workflow)(resolver_mismatch)
@@ -924,8 +846,6 @@ async def test_async_slot_impl_uncovered_branches() -> None:
     request_resolver = request_resolver_type()
     request_resolver._root_resolver = root_owner
     request_resolver._cleanup_enabled = True
-    request_resolver._context = None
-    request_resolver._parent_context_resolver = None
     request_resolver._request_resolver = request_resolver
     assert (
         await compiler_module._build_async_slot_impl(workflow=delegated_workflow)(
@@ -954,8 +874,6 @@ async def test_async_slot_impl_uncovered_branches() -> None:
     root_resolver = root_resolver_type()
     root_resolver._root_resolver = root_resolver
     root_resolver._cleanup_enabled = True
-    root_resolver._context = None
-    root_resolver._parent_context_resolver = None
     assert (
         await compiler_module._build_async_slot_impl(workflow=uncached_workflow)(root_resolver)
         == "value"
@@ -981,8 +899,6 @@ def test_sync_slot_thread_lock_second_cached_branch() -> None:
     resolver = resolver_type()
     resolver._root_resolver = resolver
     resolver._cleanup_enabled = True
-    resolver._context = None
-    resolver._parent_context_resolver = None
     resolver._cache_1 = compiler_module._MISSING_CACHE
 
     class _HookLock:
@@ -1023,8 +939,6 @@ def test_sync_slot_cached_fast_returns_without_lock() -> None:
     resolver = resolver_type()
     resolver._root_resolver = resolver
     resolver._cleanup_enabled = True
-    resolver._context = None
-    resolver._parent_context_resolver = None
     resolver._cache_1 = 11
     resolver._cache_2 = 22
 
@@ -1071,8 +985,6 @@ async def test_async_slot_cached_fast_returns_without_lock() -> None:
     resolver = resolver_type()
     resolver._root_resolver = resolver
     resolver._cleanup_enabled = True
-    resolver._context = None
-    resolver._parent_context_resolver = None
     resolver._cache_1 = 11
     resolver._cache_2 = 22
 
@@ -1098,7 +1010,6 @@ async def test_resolve_dependency_value_async_remaining_branches() -> None:
         return 2
 
     resolver = SimpleNamespace(
-        _resolve_from_context=lambda key: {int: 5}[key],
         resolve_1=lambda: 1,
         aresolve_1=_aresolve_1,
     )
@@ -1154,21 +1065,6 @@ async def test_resolve_dependency_value_async_remaining_branches() -> None:
     )
     assert handle_sync() == 1
     assert await handle_async() == 2
-
-    runtime.context_key_by_name = {"ctx": int}
-    assert (
-        await compiler_module._resolve_dependency_value_async(
-            runtime=runtime,
-            resolver=resolver,
-            dependency_plan=ProviderDependencyPlan(
-                kind="context",
-                dependency=dependency,
-                dependency_index=0,
-                ctx_key_global_name="ctx",
-            ),
-        )
-        == 5
-    )
 
     runtime.workflows_by_slot = {
         1: _workflow_plan(slot=1, is_cached=False, requires_async=True),
@@ -1397,9 +1293,6 @@ async def test_dispatch_fallback_remaining_branches() -> None:
         def _is_registered_dependency(self, dependency: Any) -> bool:
             return dependency is int
 
-        def _resolve_from_context(self, key: Any) -> Any:
-            return {int: 9}[key]
-
     resolver = _Resolver()
 
     maybe_async_provider = compiler_module._resolve_dispatch_fallback_sync(
@@ -1418,7 +1311,6 @@ async def test_dispatch_fallback_remaining_branches() -> None:
         await compiler_module._resolve_dispatch_fallback_async(resolver, Maybe[int])
         == "a:<class 'int'>"
     )
-    assert await compiler_module._resolve_dispatch_fallback_async(resolver, FromContext[int]) == 9
     assert await compiler_module._resolve_dispatch_fallback_async(resolver, All[int]) == ()
 
 
@@ -1444,22 +1336,12 @@ async def test_dispatch_fallback_retries_with_normalized_keys() -> None:
         def _is_registered_dependency(self, dependency: Any) -> bool:
             return compiler_module._resolver_is_registered_dependency(self, dependency)
 
-        def _resolve_from_context(self, key: Any) -> Any:
-            return {int: 9}[key]
-
     resolver = _Resolver()
 
     assert compiler_module._resolve_dispatch_fallback_sync(resolver, Annotated[int, "meta"]) == 11
     assert (
         await compiler_module._resolve_dispatch_fallback_async(resolver, Annotated[int, "meta"])
         == 22
-    )
-    assert (
-        compiler_module._resolve_dispatch_fallback_sync(
-            resolver,
-            FromContext[Annotated[int, "meta"]],
-        )
-        == 9
     )
 
 
@@ -1599,21 +1481,6 @@ def test_build_argument_parts_omit_branches_sync_and_async() -> None:
         )
         == []
     )
-
-
-@pytest.mark.asyncio
-async def test_resolve_dependency_value_async_missing_context_key_error() -> None:
-    with pytest.raises(ValueError, match="context key global name"):
-        await compiler_module._resolve_dependency_value_async(
-            runtime=_runtime(scopes=(_scope_plan(level=1, name="app"),), workflows=()),
-            resolver=SimpleNamespace(),
-            dependency_plan=ProviderDependencyPlan(
-                kind="context",
-                dependency=_dependency(),
-                dependency_index=0,
-                ctx_key_global_name=None,
-            ),
-        )
 
 
 def test_dependency_value_for_slot_sync_fallthrough_return() -> None:
@@ -1825,20 +1692,6 @@ def test_optimized_sync_dependency_expression_additional_branches() -> None:
             runtime=runtime,
             class_plan=action_scope,
             dependency_plan=ProviderDependencyPlan(
-                kind="context",
-                dependency=dependency,
-                dependency_index=0,
-                ctx_key_global_name=None,
-            ),
-            resolver_expression="self",
-        )
-        is compiler_module._FALLBACK_ARGUMENT_EXPRESSION
-    )
-    assert (
-        compiler._optimized_sync_dependency_expression(
-            runtime=runtime,
-            class_plan=action_scope,
-            dependency_plan=ProviderDependencyPlan(
                 kind="all",
                 dependency=dependency,
                 dependency_index=0,
@@ -1973,8 +1826,7 @@ def test_resolver_init_additional_branches() -> None:
         root_resolver,
         root_resolver=None,
         cleanup_enabled=True,
-        context=None,
-        parent_context_resolver=None,
+        parent_resolver=None,
     )
     assert root_resolver_any._root_resolver is root_resolver
     assert root_resolver_any._cache_70 is compiler_module._MISSING_CACHE
@@ -2003,8 +1855,7 @@ def test_resolver_init_additional_branches() -> None:
         no_cleanup_resolver,
         root_resolver=None,
         cleanup_enabled=False,
-        context=None,
-        parent_context_resolver=None,
+        parent_resolver=None,
     )
     assert no_cleanup_resolver_any._scope_resolver_3.args[0] is no_cleanup_resolver
 
@@ -2036,8 +1887,7 @@ def test_resolver_init_additional_branches() -> None:
         request_resolver,
         root_resolver="root",
         cleanup_enabled=True,
-        context={"k": "v"},
-        parent_context_resolver=parent_tenant,
+        parent_resolver=parent_tenant,
     )
     assert request_resolver_any._root_resolver == "root"
     assert request_resolver_any._request_resolver is request_resolver
@@ -2057,8 +1907,7 @@ def test_resolver_init_additional_branches() -> None:
         request_resolver_2,
         root_resolver="root",
         cleanup_enabled=True,
-        context=None,
-        parent_context_resolver=parent_session,
+        parent_resolver=parent_session,
     )
     assert request_resolver_2_any._tenant_resolver == "tenant-owner"
 
@@ -2068,8 +1917,7 @@ def test_resolver_init_additional_branches() -> None:
         request_resolver_3,
         root_resolver="root",
         cleanup_enabled=True,
-        context=None,
-        parent_context_resolver=None,
+        parent_resolver=None,
     )
     assert request_resolver_3_any._tenant_resolver is compiler_module._MISSING_RESOLVER
 
@@ -2094,12 +1942,10 @@ def test_resolver_enter_scope_and_transition_additional_branches() -> None:
     root_type = type("RootResolver", (), {"_runtime": runtime, "_class_plan": root_scope})
     root_resolver = root_type()
     root_resolver._root_resolver = root_resolver
-    root_resolver._context = None
-    root_resolver._parent_context_resolver = None
     root_resolver._cleanup_enabled = True
 
-    assert isinstance(compiler_module._resolver_enter_scope(root_resolver, None, None), _Ctor)
-    assert isinstance(compiler_module._resolver_enter_scope(root_resolver, 3, None), _Ctor)
+    assert isinstance(compiler_module._resolver_enter_scope(root_resolver, None), _Ctor)
+    assert isinstance(compiler_module._resolver_enter_scope(root_resolver, 3), _Ctor)
 
     stateless_runtime = _runtime(
         scopes=(root_scope, request_scope, session_scope),
@@ -2114,21 +1960,18 @@ def test_resolver_enter_scope_and_transition_additional_branches() -> None:
     )
     stateless_root = stateless_root_type()
     stateless_root._root_resolver = stateless_root
-    stateless_root._context = None
-    stateless_root._parent_context_resolver = None
     stateless_root._cleanup_enabled = True
     stateless_root._scope_resolver_3 = "pooled-request"
+    stateless_root._scope_resolver_4 = "pooled-session"
 
-    created = compiler_module._resolver_enter_scope(stateless_root, 4, {"ctx": 1})
-    assert isinstance(created, _Ctor)
-    assert created.args[0] is stateless_root
+    created = compiler_module._resolver_enter_scope(stateless_root, 4)
+    assert created == "pooled-session"
 
     assert (
         compiler_module._instantiate_scope_transition(
             runtime=stateless_runtime,
             current_resolver=stateless_root,
             target_scope=request_scope,
-            context=None,
         )
         == "pooled-request"
     )
@@ -2160,8 +2003,6 @@ def test_sync_slot_impl_delegation_and_async_required_branches() -> None:
     delegated_resolver._root_resolver = SimpleNamespace(resolve_61=lambda: "delegated")
     delegated_resolver._request_resolver = delegated_resolver
     delegated_resolver._cleanup_enabled = True
-    delegated_resolver._context = None
-    delegated_resolver._parent_context_resolver = None
     assert compiler_module._build_sync_slot_impl(workflow=delegated_workflow)(
         delegated_resolver
     ) == ("delegated")
@@ -2187,8 +2028,6 @@ def test_sync_slot_impl_delegation_and_async_required_branches() -> None:
     async_resolver._root_resolver = async_resolver
     async_resolver._request_resolver = async_resolver
     async_resolver._cleanup_enabled = True
-    async_resolver._context = None
-    async_resolver._parent_context_resolver = None
     with pytest.raises(DIWireAsyncDependencyInSyncContextError):
         compiler_module._build_sync_slot_impl(workflow=async_workflow)(async_resolver)
 

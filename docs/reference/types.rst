@@ -41,11 +41,6 @@ All
 
 .. autoclass:: diwire.All
 
-FromContext
------------
-
-.. autoclass:: diwire.FromContext
-
 Maybe
 -----
 

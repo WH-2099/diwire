@@ -6,6 +6,7 @@ import threading
 from collections.abc import AsyncGenerator, Callable, Generator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from types import TracebackType
 from typing import Annotated, Any, Generic, TypeVar, cast
@@ -16,7 +17,6 @@ from diwire import (
     Component,
     Container,
     DependencyRegistrationPolicy,
-    FromContext,
     Injected,
     Lifetime,
     LockMode,
@@ -613,11 +613,22 @@ def test_scope_resolution_requires_explicit_opened_scope_chain() -> None:
             assert from_request is from_action
 
 
-def test_resolver_context_dependency_is_resolved_and_missing_value_errors() -> None:
-    def build_consumer(value: FromContext[int]) -> _ContextValueConsumer:
+def test_contextvar_dependency_is_resolved_and_token_reset_restores_default() -> None:
+    current_value_var: ContextVar[int] = ContextVar("runtime_context_value", default=0)
+
+    def read_current_value() -> int:
+        return current_value_var.get()
+
+    def build_consumer(value: int) -> _ContextValueConsumer:
         return _ContextValueConsumer(value=value)
 
     container = Container()
+    container.add_factory(
+        read_current_value,
+        provides=int,
+        scope=Scope.REQUEST,
+        lifetime=Lifetime.TRANSIENT,
+    )
     container.add_factory(
         build_consumer,
         provides=_ContextValueConsumer,
@@ -625,26 +636,38 @@ def test_resolver_context_dependency_is_resolved_and_missing_value_errors() -> N
         lifetime=Lifetime.TRANSIENT,
     )
 
-    with container.enter_scope(Scope.REQUEST, context={int: 123}) as request_scope:
-        resolved = request_scope.resolve(_ContextValueConsumer)
-        assert resolved.value == 123
-
     with container.enter_scope(Scope.REQUEST) as request_scope:
-        with pytest.raises(DIWireDependencyNotRegisteredError, match="Context value"):
-            request_scope.resolve(_ContextValueConsumer)
+        assert request_scope.resolve(_ContextValueConsumer).value == 0
+        token = current_value_var.set(123)
+        try:
+            assert request_scope.resolve(_ContextValueConsumer).value == 123
+        finally:
+            current_value_var.reset(token)
+        assert request_scope.resolve(_ContextValueConsumer).value == 0
 
 
-def test_context_visibility_includes_scope_and_children_with_nearest_override() -> None:
-    def build_request_value(value: FromContext[int]) -> _RequestContextValue:
+def test_contextvar_visibility_includes_scope_and_children_with_nearest_override() -> None:
+    current_value_var: ContextVar[int] = ContextVar("runtime_nested_value", default=1)
+
+    def read_current_value() -> int:
+        return current_value_var.get()
+
+    def build_request_value(value: int) -> _RequestContextValue:
         return _RequestContextValue(value=value)
 
-    def build_action_value(value: FromContext[int]) -> _ActionContextValue:
+    def build_action_value(value: int) -> _ActionContextValue:
         return _ActionContextValue(value=value)
 
-    def build_step_value(value: FromContext[int]) -> _StepContextValue:
+    def build_step_value(value: int) -> _StepContextValue:
         return _StepContextValue(value=value)
 
     container = Container()
+    container.add_factory(
+        read_current_value,
+        provides=int,
+        scope=Scope.REQUEST,
+        lifetime=Lifetime.TRANSIENT,
+    )
     container.add_factory(
         build_request_value,
         provides=_RequestContextValue,
@@ -664,31 +687,50 @@ def test_context_visibility_includes_scope_and_children_with_nearest_override() 
         lifetime=Lifetime.TRANSIENT,
     )
 
-    with container.enter_scope(Scope.REQUEST, context={int: 1}) as request_scope:
+    with container.enter_scope(Scope.REQUEST) as request_scope:
         assert request_scope.resolve(_RequestContextValue).value == 1
         with request_scope.enter_scope(Scope.ACTION) as action_scope:
             assert action_scope.resolve(_ActionContextValue).value == 1
-            with action_scope.enter_scope(Scope.STEP, context={int: 2}) as step_scope:
-                assert step_scope.resolve(_StepContextValue).value == 2
-                assert step_scope.resolve(_RequestContextValue).value == 1
+            token = current_value_var.set(2)
+            try:
+                with action_scope.enter_scope(Scope.STEP) as step_scope:
+                    assert step_scope.resolve(_StepContextValue).value == 2
+                    assert step_scope.resolve(_RequestContextValue).value == 2
+            finally:
+                current_value_var.reset(token)
+            assert action_scope.resolve(_ActionContextValue).value == 1
 
 
-def test_scope_resolver_can_directly_resolve_from_context_marker() -> None:
+def test_scope_resolver_can_directly_resolve_contextvar_backed_dependency() -> None:
+    current_value_var: ContextVar[int] = ContextVar("runtime_direct_value", default=0)
     container = Container()
 
-    with container.enter_scope(Scope.REQUEST, context={int: 9}) as request_scope:
-        assert request_scope.resolve(FromContext[int]) == 9
+    def read_current_value() -> int:
+        return current_value_var.get()
+
+    container.add_factory(
+        read_current_value,
+        provides=int,
+        scope=Scope.REQUEST,
+        lifetime=Lifetime.TRANSIENT,
+    )
+
+    with container.enter_scope(Scope.REQUEST) as request_scope:
+        token = current_value_var.set(9)
+        try:
+            assert request_scope.resolve(int) == 9
+        finally:
+            current_value_var.reset(token)
 
 
-def test_scope_resolver_from_context_normalizes_non_component_metadata() -> None:
-    component_key = Annotated[int, Component("priority")]
+def test_scope_resolver_normalizes_non_component_metadata_for_regular_dependencies() -> None:
+    priority_key = Annotated[int, Component("priority")]
     container = Container()
+    container.add_instance(9, provides=int)
+    container.add_instance(7, provides=priority_key)
 
-    with container.enter_scope(Scope.REQUEST, context={int: 9, component_key: 7}) as request_scope:
-        assert request_scope.resolve(FromContext[Annotated[int, "meta"]]) == 9
-        assert (
-            request_scope.resolve(FromContext[Annotated[int, Component("priority"), "meta"]]) == 7
-        )
+    assert container.resolve(Annotated[int, "meta"]) == 9
+    assert container.resolve(Annotated[int, Component("priority"), "meta"]) == 7
 
 
 def test_assembly_passes_resolver_to_inject_wrapped_provider_calls() -> None:

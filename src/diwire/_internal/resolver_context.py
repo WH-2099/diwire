@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import functools
 import inspect
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast, overload
 
 from diwire._internal.injection import (
-    INJECT_CONTEXT_KWARG,
     INJECT_RESOLVER_KWARG,
     INJECT_WRAPPER_MARKER,
     InjectedCallableInspector,
@@ -83,10 +82,8 @@ class _ResolverBoundResolver:
     def enter_scope(
         self,
         scope: BaseScope | None = None,
-        *,
-        context: Mapping[Any, Any] | None = None,
     ) -> _ResolverBoundResolver:
-        scoped_resolver = self._resolver.enter_scope(scope, context=context)
+        scoped_resolver = self._resolver.enter_scope(scope)
         if scoped_resolver is self._resolver:
             return self
         return _ResolverBoundResolver(
@@ -276,21 +273,18 @@ class ResolverContext:
     def enter_scope(
         self,
         scope: BaseScope | None = None,
-        *,
-        context: Mapping[Any, Any] | None = None,
     ) -> ResolverProtocol:
         """Enter a child scope on the active resolver or fallback resolver.
 
         Args:
             scope: Target scope to enter. ``None`` keeps the current scope.
-            context: Optional context payload merged into the entered scope.
 
         Raises:
             DIWireResolverNotSetError: If no resolver is bound and no fallback
                 container is configured.
 
         """
-        return self._require_context_or_fallback_resolver().enter_scope(scope, context=context)
+        return self._require_context_or_fallback_resolver().enter_scope(scope)
 
     @overload
     def inject(self, func: InjectableF) -> InjectableF: ...
@@ -337,8 +331,7 @@ class ResolverContext:
                 If the target scope is already open, no additional scope is
                 entered. If the current resolver is already deeper than the
                 target scope, no additional scope is entered and resolution
-                proceeds from the current resolver (including its existing
-                scope-context chain).
+                proceeds from the current resolver.
 
         Raises:
             DIWireInvalidRegistrationError: If inject configuration values are
@@ -428,12 +421,6 @@ class ResolverContext:
             msg = (
                 f"Callable '{self._callable_name(callable_obj)}' cannot declare reserved "
                 f"parameter '{INJECT_RESOLVER_KWARG}'."
-            )
-            raise DIWireInvalidRegistrationError(msg)
-        if INJECT_CONTEXT_KWARG in signature.parameters:
-            msg = (
-                f"Callable '{self._callable_name(callable_obj)}' cannot declare reserved "
-                f"parameter '{INJECT_CONTEXT_KWARG}'."
             )
             raise DIWireInvalidRegistrationError(msg)
 

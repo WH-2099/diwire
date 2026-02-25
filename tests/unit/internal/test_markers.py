@@ -12,8 +12,6 @@ from diwire._internal.markers import (
     AllMarker,
     AsyncProvider,
     Component,
-    FromContext,
-    FromContextMarker,
     Injected,
     InjectedMarker,
     Maybe,
@@ -23,11 +21,9 @@ from diwire._internal.markers import (
     component_base_key,
     is_all_annotation,
     is_async_provider_annotation,
-    is_from_context_annotation,
     is_maybe_annotation,
     is_provider_annotation,
     strip_all_annotation,
-    strip_from_context_annotation,
     strip_maybe_annotation,
     strip_non_component_annotation,
     strip_provider_annotation,
@@ -101,34 +97,6 @@ def test_injected_preserves_component_marker_metadata_when_nested() -> None:
     assert annotation_args[0] is Database
     assert annotation_args[1] == Component("primary")
     assert isinstance(annotation_args[2], InjectedMarker)
-
-
-def test_from_context_wraps_dependency_with_marker() -> None:
-    dependency = FromContext[Database]
-
-    assert get_origin(dependency) is Annotated
-    annotation_args = get_args(dependency)
-    assert annotation_args[0] is Database
-    assert isinstance(annotation_args[1], FromContextMarker)
-
-
-def test_from_context_preserves_component_marker_metadata_when_nested() -> None:
-    dependency = FromContext[PrimaryDatabaseComponent]
-
-    assert get_origin(dependency) is Annotated
-    annotation_args = get_args(dependency)
-    assert annotation_args[0] is Database
-    assert annotation_args[1] == Component("primary")
-    assert isinstance(annotation_args[2], FromContextMarker)
-
-
-def test_from_context_helpers_detect_and_strip_marker() -> None:
-    dependency = FromContext[PrimaryDatabaseComponent]
-
-    assert is_from_context_annotation(dependency) is True
-    assert strip_from_context_annotation(dependency) == PrimaryDatabaseComponent
-    assert is_from_context_annotation(int) is False
-    assert strip_from_context_annotation(int) is int
 
 
 def test_maybe_wraps_dependency_with_marker() -> None:
@@ -323,7 +291,7 @@ def test_injected_provider_preserves_provider_metadata() -> None:
     assert isinstance(annotation_args[3], InjectedMarker)
 
 
-def test_is_from_context_annotation_handles_invalid_annotated_shape(
+def test_marker_helpers_handle_invalid_annotated_shape(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(markers_module, "get_origin", lambda _annotation: Annotated)
@@ -331,7 +299,6 @@ def test_is_from_context_annotation_handles_invalid_annotated_shape(
 
     sentinel = object()
 
-    assert markers_module.is_from_context_annotation(sentinel) is False
     assert markers_module.is_maybe_annotation(sentinel) is False
     assert markers_module.is_provider_annotation(sentinel) is False
     assert markers_module.is_all_annotation(sentinel) is False

@@ -68,12 +68,6 @@ class Scopes(BaseScopes):
             with container.enter_scope(Scope.REQUEST) as request_resolver:
                 service = request_resolver.resolve(Service)
 
-            with container.enter_scope(
-                Scope.REQUEST,
-                context={int: 42},
-            ) as request_resolver:
-                value = request_resolver.resolve(FromContext[int])
-
     """
 
     APP: BaseScope = field(default=BaseScope(1))
@@ -89,6 +83,6 @@ Scope = Scopes()
 Examples:
     .. code-block:: python
 
-        with container.enter_scope(Scope.REQUEST, context={str: "tenant-a"}) as request_resolver:
+        with container.enter_scope(Scope.REQUEST) as request_resolver:
             handler = request_resolver.resolve(Handler)
 """
