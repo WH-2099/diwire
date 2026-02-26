@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, Generic, TypeVar, cast
 
 import pytest
@@ -32,8 +33,13 @@ class _User(_Model):
     pass
 
 
+class _StateLike:
+    pass
+
+
 M = TypeVar("M", bound=_Model)
 C = TypeVar("C", str, bytes)
+S = TypeVar("S", bound=Mapping[str, Any] | _StateLike)
 
 
 class _ModelBox(Generic[M]):
@@ -41,6 +47,10 @@ class _ModelBox(Generic[M]):
 
 
 class _ConstrainedBox(Generic[C]):
+    pass
+
+
+class _UnionBoundBox(Generic[S]):
     pass
 
 
@@ -170,4 +180,27 @@ def test_typevar_constraints_validation_runs_during_match() -> None:
     assert registry.find_best_match(_ConstrainedBox[str]) is not None
     invalid_key = cast("Any", _ConstrainedBox)[int]
     with pytest.raises(DIWireInvalidGenericTypeArgumentError, match="must satisfy one of"):
+        registry.find_best_match(invalid_key)
+
+
+def test_typevar_union_bound_with_parameterized_generic_runs_during_match() -> None:
+    registry = OpenGenericRegistry()
+    registry.register(
+        provides=_UnionBoundBox[S],
+        provider_kind="factory",
+        provider=_factory_a,
+        lifetime=Lifetime.TRANSIENT,
+        scope=Scope.APP,
+        lock_mode=LockMode.NONE,
+        is_async=False,
+        is_any_dependency_async=False,
+        needs_cleanup=False,
+        dependencies=[],
+    )
+
+    assert registry.find_best_match(_UnionBoundBox[_StateLike]) is not None
+    assert registry.find_best_match(_UnionBoundBox[dict[str, Any]]) is not None
+
+    invalid_key = cast("Any", _UnionBoundBox)[int]
+    with pytest.raises(DIWireInvalidGenericTypeArgumentError, match="bound"):
         registry.find_best_match(invalid_key)

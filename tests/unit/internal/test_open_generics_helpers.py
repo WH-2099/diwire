@@ -286,6 +286,22 @@ def test_matches_type_constraint_handles_any_and_issubclass_type_error(
     assert open_generics._matches_type_constraint(argument=int, constraint=int) is False
 
 
+def test_matches_type_constraint_handles_union_with_parameterized_generic() -> None:
+    class _StateLike:
+        pass
+
+    constraint = typing.Mapping[str, Any] | _StateLike
+
+    assert (
+        open_generics._matches_type_constraint(argument=_StateLike, constraint=constraint) is True
+    )
+    assert (
+        open_generics._matches_type_constraint(argument=dict[str, Any], constraint=constraint)
+        is True
+    )
+    assert open_generics._matches_type_constraint(argument=int, constraint=constraint) is False
+
+
 def test_resolve_scope_transition_path_handles_all_error_and_success_paths() -> None:
     with pytest.raises(DIWireScopeMismatchError, match="Cannot enter deeper scope"):
         open_generics._resolve_scope_transition_path(

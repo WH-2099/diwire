@@ -7,8 +7,8 @@ import threading
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
-from types import TracebackType
-from typing import TYPE_CHECKING, Any, Literal, NoReturn, TypeVar, cast, get_args, get_origin
+from types import TracebackType, UnionType
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, TypeVar, Union, cast, get_args, get_origin
 
 from diwire._internal.injection import INJECT_RESOLVER_KWARG, INJECT_WRAPPER_MARKER
 from diwire._internal.lock_mode import LockMode
@@ -1937,6 +1937,12 @@ def _is_type_argument_valid(*, typevar: TypeVar, argument: Any) -> bool:
 def _matches_type_constraint(*, argument: Any, constraint: Any) -> bool:
     if constraint is Any:
         return True
+    constraint_origin = get_origin(constraint)
+    if constraint_origin in (Union, UnionType):
+        return any(
+            _matches_type_constraint(argument=argument, constraint=union_member)
+            for union_member in get_args(constraint)
+        )
     argument_type = _origin_or_self(argument)
     constraint_type = _origin_or_self(constraint)
     if isinstance(argument_type, type) and isinstance(constraint_type, type):
