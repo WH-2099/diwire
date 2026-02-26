@@ -42,6 +42,7 @@ diwire.resolver_context | object | <not-callable>
 diwire.exceptions.DIWireAsyncDependencyInSyncContextError | class | <no-signature>
 diwire.exceptions.DIWireDependencyNotRegisteredError | class | <no-signature>
 diwire.exceptions.DIWireError | class | <no-signature>
+diwire.exceptions.DIWireIntegrationError | class | <no-signature>
 diwire.exceptions.DIWireInvalidGenericTypeArgumentError | class | <no-signature>
 diwire.exceptions.DIWireInvalidProviderSpecError | class | <no-signature>
 diwire.exceptions.DIWireInvalidRegistrationError | class | <no-signature>

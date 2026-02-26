@@ -104,3 +104,7 @@ class DIWireInvalidGenericTypeArgumentError(DIWireError):
     Typical fixes include resolving a compatible closed generic key or tightening
     open-generic provider annotations to reflect valid constraints.
     """
+
+
+class DIWireIntegrationError(DIWireError):
+    """Signal integration error."""
