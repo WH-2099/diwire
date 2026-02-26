@@ -55,6 +55,26 @@ jobs:
           fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
 
+  e2e-fastapi-compose:
+    name: E2E FastAPI (Docker Compose, Python 3.14)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Run FastAPI e2e tests via Docker Compose
+        run: docker compose -f tests/e2e/fastapi/docker-compose.yml up --build --abort-on-container-exit --exit-code-from tests
+
+      - name: Print Docker Compose logs
+        if: always()
+        run: docker compose -f tests/e2e/fastapi/docker-compose.yml logs --no-color
+
+      - name: Tear down Docker Compose services
+        if: always()
+        run: docker compose -f tests/e2e/fastapi/docker-compose.yml down --volumes --remove-orphans
+
   docs:
     name: Docs Build
     runs-on: ubuntu-latest

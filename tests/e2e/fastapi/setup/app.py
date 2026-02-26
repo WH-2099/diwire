@@ -1,6 +1,6 @@
 import uvicorn
 from fastapi import FastAPI
-from starlette.websockets import WebSocket
+from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from diwire import Container, Injected, Scope, resolver_context
 from diwire.integrations.fastapi import RequestContextMiddleware, add_request_context
@@ -43,7 +43,10 @@ async def websocket_request_based_service_with_custom_state(
 ) -> None:
     await ws.accept()
     while True:
-        _data = await ws.receive_text()
+        try:
+            _data = await ws.receive_text()
+        except WebSocketDisconnect:
+            break
         await ws.send_text(service.work())
 
 
