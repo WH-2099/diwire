@@ -14,11 +14,15 @@ import pytest
 from typing_extensions import TypeVar as TypeVarExt
 
 from diwire import (
+    All,
     Component,
     Container,
+    DependencyRegistrationPolicy,
     Injected,
     Lifetime,
     LockMode,
+    Maybe,
+    Provider,
     ResolverContext,
     Scope,
     resolver_context,
@@ -35,6 +39,7 @@ from diwire.exceptions import (
 T = TypeVar("T")
 U = TypeVar("U")
 DefaultT = TypeVarExt("DefaultT", default=str)
+AutoDefaultT = TypeVarExt("AutoDefaultT", default=str)
 
 
 class _IBox(Generic[T]):
@@ -44,6 +49,21 @@ class _IBox(Generic[T]):
 @dataclass
 class _DefaultBox(Generic[DefaultT]):
     type: type[DefaultT]
+
+
+@dataclass
+class _UsesDefaultBox:
+    box: _DefaultBox
+
+
+class _AutoOpen(Generic[AutoDefaultT]):
+    def __init__(self, source: str = "concrete") -> None:
+        self.source = source
+
+
+@dataclass
+class _UsesAutoOpen:
+    dep: _AutoOpen
 
 
 @dataclass(slots=True, kw_only=True)
@@ -92,6 +112,10 @@ def _create_box(type_arg: type[T]) -> _IBox[T]:
 
 def _create_default_box(type_arg: type[DefaultT]) -> _DefaultBox[DefaultT]:
     return _DefaultBox(type=type_arg)
+
+
+def _create_auto_open(type_arg: type[AutoDefaultT]) -> _AutoOpen[AutoDefaultT]:
+    return _AutoOpen(source=f"factory-{type_arg.__name__}")
 
 
 def _create_box_positional_only(type_arg: type[T], /) -> _IBox[T]:
@@ -647,6 +671,133 @@ def test_resolving_open_generic_without_type_arguments_uses_typevar_defaults() -
     assert isinstance(explicit_resolved, _DefaultBox)
     assert explicit_resolved.type is int
     assert container._providers_registrations.find_by_type(_DefaultBox[str]) is not None
+
+
+def test_open_generic_default_typevar_dependency_resolves_for_registered_provider() -> None:
+    container = Container()
+    container.add_factory(_create_default_box, provides=_DefaultBox)
+    container.add(_UsesDefaultBox)
+
+    resolved = container.resolve(_UsesDefaultBox)
+
+    assert isinstance(resolved, _UsesDefaultBox)
+    assert isinstance(resolved.box, _DefaultBox)
+    assert resolved.box.type is str
+
+
+def test_open_generic_default_typevar_dependency_resolves_for_autoregistered_provider() -> None:
+    container = Container()
+    container.add_factory(_create_default_box, provides=_DefaultBox)
+
+    resolved = container.resolve(_UsesDefaultBox)
+
+    assert isinstance(resolved, _UsesDefaultBox)
+    assert isinstance(resolved.box, _DefaultBox)
+    assert resolved.box.type is str
+
+
+def test_open_generic_dependency_autoregistration_does_not_override_open_registration() -> None:
+    container = Container()
+    container.add_factory(_create_auto_open, provides=_AutoOpen)
+
+    resolved = container.resolve(_UsesAutoOpen)
+
+    assert isinstance(resolved, _UsesAutoOpen)
+    assert isinstance(resolved.dep, _AutoOpen)
+    assert resolved.dep.source == "factory-str"
+
+
+def test_open_generic_materialization_dependency_key_handles_markers() -> None:
+    container = Container()
+
+    assert container._open_generic_materialization_dependency_key(Maybe[_IBox[int]]) == _IBox[int]
+    assert (
+        container._open_generic_materialization_dependency_key(Provider[_IBox[int]]) == _IBox[int]
+    )
+    assert container._open_generic_materialization_dependency_key(All[_IBox[int]]) is None
+
+
+def test_materialize_registered_open_generic_dependencies_covers_no_match_and_all_marker() -> None:
+    container = Container()
+    container.add_factory(_create_box, provides=_IBox)
+
+    @dataclass
+    class _UsesAllBox:
+        items: All[_IBox[Any]]
+
+    @dataclass
+    class _UsesUnmatchedDependency:
+        value: _DefaultBox
+
+    container.add(
+        _UsesAllBox,
+        dependency_registration_policy=DependencyRegistrationPolicy.IGNORE,
+    )
+    container.add(
+        _UsesUnmatchedDependency,
+        dependency_registration_policy=DependencyRegistrationPolicy.IGNORE,
+    )
+
+    container._materialize_registered_open_generic_dependencies()
+
+    assert container._providers_registrations.find_by_type(_DefaultBox) is None
+
+
+def test_materialize_registered_open_generic_dependencies_materializes_and_rechecks() -> None:
+    container = Container()
+    container.add_factory(_create_default_box, provides=_DefaultBox)
+    container.add(
+        _UsesDefaultBox,
+        dependency_registration_policy=DependencyRegistrationPolicy.IGNORE,
+    )
+
+    assert container._providers_registrations.find_by_type(_DefaultBox) is None
+
+    container._materialize_registered_open_generic_dependencies()
+
+    assert container._providers_registrations.find_by_type(_DefaultBox) is not None
+
+
+def test_materialize_registered_open_generic_dependencies_reiterates_after_materialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = Container()
+
+    @dataclass
+    class _NeedsStr:
+        value: str
+        mirror: str
+
+    container.add(
+        _NeedsStr,
+        dependency_registration_policy=DependencyRegistrationPolicy.IGNORE,
+    )
+
+    materialization_marker = object()
+    materialization_calls = 0
+
+    monkeypatch.setattr(container._open_generic_registry, "has_specs", lambda: True)
+
+    def _find_best_match(dependency: Any) -> Any:
+        if dependency is str and container._providers_registrations.find_by_type(str) is None:
+            return materialization_marker
+        return None
+
+    monkeypatch.setattr(container._open_generic_registry, "find_best_match", _find_best_match)
+
+    def _materialize(dependency: Any, match: Any) -> None:
+        nonlocal materialization_calls
+        materialization_calls += 1
+        assert dependency is str
+        assert match is materialization_marker
+        container.add_instance("materialized", provides=str)
+
+    monkeypatch.setattr(container, "_materialize_closed_open_generic_spec", _materialize)
+
+    container._materialize_registered_open_generic_dependencies()
+
+    assert materialization_calls == 1
+    assert container._providers_registrations.find_by_type(str) is not None
 
 
 def test_autoregister_skips_open_generic_dependencies_when_match_exists() -> None:

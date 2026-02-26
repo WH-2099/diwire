@@ -2157,6 +2157,8 @@ class Container:
             )
             if self._providers_registrations.find_by_type(dependency_key):
                 continue
+            if self._open_generic_registry.has_match_for_dependency(dependency_key):
+                continue
             with suppress(DIWireError):
                 self._autoregister_dependency(
                     dependency=dependency_key,
@@ -2709,6 +2711,41 @@ class Container:
     def _callable_name(self, callable_obj: Callable[..., Any]) -> str:
         return getattr(callable_obj, "__qualname__", repr(callable_obj))
 
+    def _materialize_registered_open_generic_dependencies(self) -> None:
+        if not self._open_generic_registry.has_specs():
+            return
+
+        while True:
+            materialized_any = False
+            for provider_spec in tuple(self._providers_registrations.values()):
+                for provider_dependency in provider_spec.dependencies:
+                    dependency_key = self._open_generic_materialization_dependency_key(
+                        provider_dependency.provides,
+                    )
+                    if dependency_key is None:
+                        continue
+                    if self._providers_registrations.find_by_type(dependency_key) is not None:
+                        continue
+                    open_match = self._open_generic_registry.find_best_match(dependency_key)
+                    if open_match is None:
+                        continue
+                    registration_count_before = len(tuple(self._providers_registrations.values()))
+                    self._materialize_closed_open_generic_spec(dependency_key, open_match)
+                    registration_count_after = len(tuple(self._providers_registrations.values()))
+                    materialized_any |= registration_count_after > registration_count_before
+            if not materialized_any:
+                return
+
+    def _open_generic_materialization_dependency_key(self, dependency: Any) -> Any | None:
+        dependency_key = dependency
+        if is_maybe_annotation(dependency_key):
+            dependency_key = strip_maybe_annotation(dependency_key)
+        if is_provider_annotation(dependency_key):
+            dependency_key = strip_provider_annotation(dependency_key)
+        if is_all_annotation(dependency_key):
+            return None
+        return strip_non_component_annotation(dependency_key)
+
     # endregion Registration Methods
 
     # region Compilation
@@ -2738,6 +2775,7 @@ class Container:
         """
         with self._graph_state_lock:
             if self._root_resolver is None:
+                self._materialize_registered_open_generic_dependencies()
                 root_resolver = self._resolvers_manager.build_root_resolver(
                     root_scope=self._root_scope,
                     registrations=self._providers_registrations,
