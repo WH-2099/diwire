@@ -159,6 +159,9 @@ ignore = [
     # All rules ignored in temporary files
     "ALL",
 ]
+"tests/e2e/**" = [
+    "T201",
+]
 
 [lint.isort]
 combine-as-imports = true
