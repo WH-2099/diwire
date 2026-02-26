@@ -110,6 +110,8 @@ class Container:
         "aresolve",
         "enter_scope",
     )
+    _OPEN_GENERIC_MATERIALIZATION_MAX_ITERATIONS: int = 10_000
+    _OPEN_GENERIC_MATERIALIZATION_STATE_TAIL_SIZE: int = 3
 
     def __init__(
         self,
@@ -2715,8 +2717,19 @@ class Container:
         if not self._open_generic_registry.has_specs():
             return
 
+        iteration_count = 0
+        seen_iteration_states: set[tuple[int, int, tuple[str, ...]]] = set()
         while True:
+            iteration_count += 1
+            if iteration_count > self._OPEN_GENERIC_MATERIALIZATION_MAX_ITERATIONS:
+                self._raise_non_converging_open_generic_materialization_error(
+                    iteration_count=iteration_count,
+                    max_iterations=self._OPEN_GENERIC_MATERIALIZATION_MAX_ITERATIONS,
+                )
+
             materialized_any = False
+            materialized_dependency_reprs: list[str] = []
+            registration_count_iteration_start = len(tuple(self._providers_registrations.values()))
             for provider_spec in tuple(self._providers_registrations.values()):
                 for provider_dependency in provider_spec.dependencies:
                     dependency_key = self._open_generic_materialization_dependency_key(
@@ -2732,9 +2745,46 @@ class Container:
                     registration_count_before = len(tuple(self._providers_registrations.values()))
                     self._materialize_closed_open_generic_spec(dependency_key, open_match)
                     registration_count_after = len(tuple(self._providers_registrations.values()))
-                    materialized_any |= registration_count_after > registration_count_before
+                    if registration_count_after > registration_count_before:
+                        materialized_any = True
+                        materialized_dependency_reprs.append(repr(dependency_key))
             if not materialized_any:
                 return
+
+            registration_count_iteration_end = len(tuple(self._providers_registrations.values()))
+            iteration_state = (
+                registration_count_iteration_end,
+                registration_count_iteration_end - registration_count_iteration_start,
+                tuple(
+                    materialized_dependency_reprs[
+                        -self._OPEN_GENERIC_MATERIALIZATION_STATE_TAIL_SIZE :
+                    ]
+                ),
+            )
+            if iteration_state in seen_iteration_states:
+                self._raise_non_converging_open_generic_materialization_error(
+                    iteration_count=iteration_count,
+                    max_iterations=self._OPEN_GENERIC_MATERIALIZATION_MAX_ITERATIONS,
+                    repeated_state=iteration_state,
+                )
+            seen_iteration_states.add(iteration_state)
+
+    def _raise_non_converging_open_generic_materialization_error(
+        self,
+        *,
+        iteration_count: int,
+        max_iterations: int,
+        repeated_state: tuple[int, int, tuple[str, ...]] | None = None,
+    ) -> None:
+        msg = (
+            "Open generic materialization did not converge while compiling container registrations. "
+            f"iterations={iteration_count}, max_iterations={max_iterations}, "
+            f"repeated_iteration_state={repeated_state!r}. "
+            "Debug context: _open_generic_materialization_dependency_key, "
+            "_materialize_closed_open_generic_spec, _providers_registrations, "
+            "_open_generic_registry."
+        )
+        raise DIWireInvalidRegistrationError(msg)
 
     def _open_generic_materialization_dependency_key(self, dependency: Any) -> Any | None:
         dependency_key = dependency
