@@ -16,6 +16,11 @@ app = FastAPI()
 app.add_middleware(RequestContextMiddleware)
 
 
+@app.get("/health")
+async def health() -> str:
+    return "OK"
+
+
 @app.get("/services/request-based")
 @resolver_context.inject(scope=Scope.REQUEST)
 async def request_based_service(service: Injected[RequestBasedService]) -> str:
