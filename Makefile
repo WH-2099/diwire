@@ -14,9 +14,9 @@ test:
 
 test-e2e-fastapi:
 	@set +e; \
-	docker compose -f tests/e2e/fastapi/docker-compose.yml up --build --abort-on-container-exit --exit-code-from tests; \
+	docker compose -f tests/e2e/fastapi/docker-compose.yaml up --build --abort-on-container-exit --exit-code-from tests; \
 	exit_code=$$?; \
-	docker compose -f tests/e2e/fastapi/docker-compose.yml down --volumes --remove-orphans; \
+	docker compose -f tests/e2e/fastapi/docker-compose.yaml down --volumes --remove-orphans; \
 	exit $$exit_code
 
 test-all-pythons:

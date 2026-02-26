@@ -65,15 +65,15 @@ jobs:
           fetch-depth: 0
 
       - name: Run FastAPI e2e tests via Docker Compose
-        run: docker compose -f tests/e2e/fastapi/docker-compose.yml up --build --abort-on-container-exit --exit-code-from tests
+        run: docker compose -f tests/e2e/fastapi/docker-compose.yaml up --build --abort-on-container-exit --exit-code-from tests
 
       - name: Print Docker Compose logs
         if: always()
-        run: docker compose -f tests/e2e/fastapi/docker-compose.yml logs --no-color
+        run: docker compose -f tests/e2e/fastapi/docker-compose.yaml logs --no-color
 
       - name: Tear down Docker Compose services
         if: always()
-        run: docker compose -f tests/e2e/fastapi/docker-compose.yml down --volumes --remove-orphans
+        run: docker compose -f tests/e2e/fastapi/docker-compose.yaml down --volumes --remove-orphans
 
   docs:
     name: Docs Build
