@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from typing import Annotated, Any, Generic, TypeVar, cast
 
 import pytest
+from typing_extensions import TypeVar as TypeVarExt
 
 from diwire import (
     Component,
@@ -33,10 +34,16 @@ from diwire.exceptions import (
 
 T = TypeVar("T")
 U = TypeVar("U")
+DefaultT = TypeVarExt("DefaultT", default=str)
 
 
 class _IBox(Generic[T]):
     pass
+
+
+@dataclass
+class _DefaultBox(Generic[DefaultT]):
+    type: type[DefaultT]
 
 
 @dataclass(slots=True, kw_only=True)
@@ -81,6 +88,10 @@ class _SpecialIntBox(_IBox[int]):
 
 def _create_box(type_arg: type[T]) -> _IBox[T]:
     return _Box(type=type_arg)
+
+
+def _create_default_box(type_arg: type[DefaultT]) -> _DefaultBox[DefaultT]:
+    return _DefaultBox(type=type_arg)
 
 
 def _create_box_positional_only(type_arg: type[T], /) -> _IBox[T]:
@@ -622,6 +633,20 @@ def test_resolving_open_generic_without_type_arguments_remains_unregistered() ->
 
     with pytest.raises(DIWireDependencyNotRegisteredError):
         container.resolve(_IBox)
+
+
+def test_resolving_open_generic_without_type_arguments_uses_typevar_defaults() -> None:
+    container = Container()
+    container.add_factory(_create_default_box, provides=_DefaultBox)
+
+    default_resolved = container.resolve(_DefaultBox)
+    explicit_resolved = container.resolve(_DefaultBox[int])
+
+    assert isinstance(default_resolved, _DefaultBox)
+    assert default_resolved.type is str
+    assert isinstance(explicit_resolved, _DefaultBox)
+    assert explicit_resolved.type is int
+    assert container._providers_registrations.find_by_type(_DefaultBox[str]) is not None
 
 
 def test_autoregister_skips_open_generic_dependencies_when_match_exists() -> None:
