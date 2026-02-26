@@ -1,19 +1,18 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from typing import TYPE_CHECKING
 
 import pytest
 
 from diwire import Container, Injected, Lifetime, Scope, resolver_context
-from diwire.integrations.fastapi import RequestContextMiddleware, add_request_context
 
-pytest.importorskip("fastapi")
-
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
-from starlette.datastructures import State
-from starlette.requests import Request
-from starlette.websockets import WebSocket
+if TYPE_CHECKING:
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from starlette.datastructures import State
+    from starlette.requests import Request
+    from starlette.websockets import WebSocket
 
 
 class _RequestPathService:
@@ -34,6 +33,21 @@ class _WebSocketPathService:
 
 @pytest.fixture()
 def app() -> FastAPI:
+    pytest.importorskip("fastapi")
+
+    from fastapi import FastAPI
+    from starlette.datastructures import State
+    from starlette.requests import Request
+    from starlette.websockets import WebSocket
+
+    from diwire.integrations.fastapi import RequestContextMiddleware, add_request_context
+
+    # diwire resolves dependencies via runtime type hints; populate module globals so
+    # forward references like `Request[State]` and `WebSocket` can be evaluated.
+    globals()["Request"] = Request
+    globals()["State"] = State
+    globals()["WebSocket"] = WebSocket
+
     container = Container()
     add_request_context(container)
     container.add(
@@ -85,6 +99,10 @@ def app() -> FastAPI:
 
 @pytest.fixture()
 def client(app: FastAPI) -> Iterator[TestClient]:
+    pytest.importorskip("fastapi")
+
+    from fastapi.testclient import TestClient
+
     with TestClient(app) as test_client:
         yield test_client
 
