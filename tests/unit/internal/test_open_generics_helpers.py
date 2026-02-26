@@ -306,8 +306,18 @@ def test_typevar_default_helpers_cover_missing_and_unresolved_defaults() -> None
     class _NoDefaultAttribute:
         pass
 
+    class NoDefaultType:
+        pass
+
+    class _NoDefaultSentinel:
+        __default__ = NoDefaultType()
+
     assert (
         open_generics._typevar_default_or_missing(cast("Any", _NoDefaultAttribute()))
+        is open_generics._MISSING_TYPEVAR_DEFAULT
+    )
+    assert (
+        open_generics._typevar_default_or_missing(cast("Any", _NoDefaultSentinel()))
         is open_generics._MISSING_TYPEVAR_DEFAULT
     )
 
