@@ -2719,9 +2719,17 @@ class Container:
 
         iteration_count = 0
         seen_iteration_states: set[tuple[int, int, tuple[str, ...]]] = set()
+        materialized_registration_keys: list[Any] = []
+        materialized_registration_keys_seen: set[Any] = set()
+        materialized_closed_keys: list[Any] = []
+        materialized_closed_keys_seen: set[Any] = set()
         while True:
             iteration_count += 1
             if iteration_count > self._OPEN_GENERIC_MATERIALIZATION_MAX_ITERATIONS:
+                self._rollback_open_generic_materialization(
+                    materialized_registration_keys=materialized_registration_keys,
+                    materialized_closed_keys=materialized_closed_keys,
+                )
                 self._raise_non_converging_open_generic_materialization_error(
                     iteration_count=iteration_count,
                     max_iterations=self._OPEN_GENERIC_MATERIALIZATION_MAX_ITERATIONS,
@@ -2748,6 +2756,15 @@ class Container:
                     if registration_count_after > registration_count_before:
                         materialized_any = True
                         materialized_dependency_reprs.append(repr(dependency_key))
+                        if dependency_key not in materialized_registration_keys_seen:
+                            materialized_registration_keys_seen.add(dependency_key)
+                            materialized_registration_keys.append(dependency_key)
+                        if (
+                            dependency_key in self._runtime_materialized_closed_keys
+                            and dependency_key not in materialized_closed_keys_seen
+                        ):
+                            materialized_closed_keys_seen.add(dependency_key)
+                            materialized_closed_keys.append(dependency_key)
             if not materialized_any:
                 return
 
@@ -2762,12 +2779,38 @@ class Container:
                 ),
             )
             if iteration_state in seen_iteration_states:
+                self._rollback_open_generic_materialization(
+                    materialized_registration_keys=materialized_registration_keys,
+                    materialized_closed_keys=materialized_closed_keys,
+                )
                 self._raise_non_converging_open_generic_materialization_error(
                     iteration_count=iteration_count,
                     max_iterations=self._OPEN_GENERIC_MATERIALIZATION_MAX_ITERATIONS,
                     repeated_state=iteration_state,
                 )
             seen_iteration_states.add(iteration_state)
+
+    def _rollback_open_generic_materialization(
+        self,
+        *,
+        materialized_registration_keys: list[Any],
+        materialized_closed_keys: list[Any],
+    ) -> None:
+        if not materialized_registration_keys and not materialized_closed_keys:
+            return
+
+        if materialized_registration_keys:
+            materialized_registration_keys_set = set(materialized_registration_keys)
+            providers_registrations = ProvidersRegistrations()
+            for spec in self._providers_registrations.values():
+                if spec.provides in materialized_registration_keys_set:
+                    continue
+                providers_registrations.add(spec)
+            self._providers_registrations = providers_registrations
+
+        for materialized_closed_key in materialized_closed_keys:
+            self._runtime_materialized_closed_keys.discard(materialized_closed_key)
+        self._invalidate_compilation()
 
     def _raise_non_converging_open_generic_materialization_error(
         self,
