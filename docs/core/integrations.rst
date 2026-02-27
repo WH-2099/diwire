@@ -1,5 +1,5 @@
 .. meta::
-   :description: Integrations and compatibility notes for diwire: supported constructor/field extraction, pydantic-settings, and the optional pytest plugin.
+   :description: Integrations and compatibility notes for diwire: supported constructor/field extraction, pydantic-settings, pytest plugin, web frameworks, and Celery tasks.
 
 Integrations
 ============
@@ -38,12 +38,26 @@ functions from a root test container.
 
 Runnable example: :doc:`/howto/examples/pytest-plugin`.
 
-Web frameworks (FastAPI + Litestar + aiohttp)
----------------------------------------------
+Web frameworks (FastAPI + Litestar + aiohttp + Flask + Django)
+---------------------------------------------------------------
 
-diwire includes dedicated middleware/context integrations for FastAPI, Litestar, and aiohttp.
-Use ``@resolver_context.inject(scope=Scope.REQUEST)`` on handlers/endpoints and install the
-framework-specific request context middleware plus ``add_request_context(container)``.
+diwire includes dedicated web integrations for FastAPI, Litestar, aiohttp, Flask, and Django.
+Use ``@resolver_context.inject(scope=Scope.REQUEST)`` on handlers/endpoints and register request
+access with ``add_request_context(container)``.
 
-See :doc:`/howto/web/fastapi`, :doc:`/howto/web/litestar`, :doc:`/howto/web/aiohttp`, and the
-runnable script :doc:`/howto/examples/fastapi`.
+See :doc:`/howto/web/fastapi`, :doc:`/howto/web/litestar`, :doc:`/howto/web/aiohttp`, :doc:`/howto/web/flask`,
+:doc:`/howto/web/django`, and the runnable script
+:doc:`/howto/examples/fastapi`.
+
+FastAPI, Litestar, aiohttp, and Django require request-context middleware to bind the active
+request/connection object. Flask does not require middleware because the integration reads from
+Flask's request-local context.
+
+Celery tasks
+------------
+
+diwire supports Celery task injection without a dedicated adapter module.
+Use ``@resolver_context.inject(scope=Scope.REQUEST)`` directly on task functions
+and annotate dependencies as ``Injected[T]``.
+
+See :doc:`/howto/web/celery`.

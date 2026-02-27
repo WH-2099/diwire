@@ -100,6 +100,26 @@ jobs:
         if: always()
         run: docker compose -f tests/e2e/aiohttp/docker-compose.yml down --volumes --remove-orphans
 
+  e2e-celery-compose:
+    name: E2E Celery (Docker Compose, Python 3.14)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Run Celery e2e tests via Docker Compose
+        run: docker compose -f tests/e2e/celery/docker-compose.yml up --build --abort-on-container-exit --exit-code-from tests
+
+      - name: Print Docker Compose logs
+        if: always()
+        run: docker compose -f tests/e2e/celery/docker-compose.yml logs --no-color
+
+      - name: Tear down Docker Compose services
+        if: always()
+        run: docker compose -f tests/e2e/celery/docker-compose.yml down --volumes --remove-orphans
+
   docs:
     name: Docs Build
     runs-on: ubuntu-latest

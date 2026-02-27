@@ -19,6 +19,7 @@ resolvers, and free-threaded Python (no-GIL) — all with zero runtime dependenc
 - **Async resolution**: ``aresolve()`` mirrors ``resolve()`` and async providers are first-class. ([Async](https://docs.diwire.dev/core/async.html))
 - **Open generics**: register once, resolve for many type parameters. ([Open generics](https://docs.diwire.dev/core/open-generics.html))
 - **Function injection**: ``Injected[T]`` for ergonomic handlers. ([Function injection](https://docs.diwire.dev/core/function-injection.html))
+- **Framework/task support**: works with FastAPI, aiohttp, Flask, Django, and Celery patterns. ([Integrations](https://docs.diwire.dev/core/integrations.html))
 - **Named components + collect-all**: ``Component("name")`` and ``All[T]``. ([Components](https://docs.diwire.dev/core/components.html))
 - **Concurrency + free-threaded builds**: configurable locking via ``LockMode``. ([Concurrency](https://docs.diwire.dev/howto/advanced/concurrency.html))
 
