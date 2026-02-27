@@ -20,16 +20,6 @@ Installation
 
    uv add diwire
 
-.. code-block:: bash
-
-   pip install diwire
-
-Quick start (FastAPI)
----------------------
-
-If you use FastAPI and want constructor injection, request/job scopes, and deterministic cleanup, start here:
-:doc:`quickstart-fastapi`.
-
 Quick start (pure Python)
 -------------------------
 
@@ -61,6 +51,23 @@ Define your classes. Resolve the top-level one. diwire figures out the rest.
    container = Container()
    service = container.resolve(UserService)
    print(service.repo.db.host)  # => localhost
+
+Web frameworks (and task/testing integrations)
+----------------------------------------------
+
+If you use a framework, start with the integration guides:
+
+- :doc:`howto/web/fastapi`
+- :doc:`howto/web/litestar`
+- :doc:`howto/web/aiohttp`
+- :doc:`howto/web/starlette`
+- :doc:`howto/web/flask`
+- :doc:`howto/web/django`
+- :doc:`howto/web/celery`
+- :doc:`howto/testing/pytest`
+- :doc:`core/integrations`
+
+For an end-to-end FastAPI example, see :doc:`quickstart-fastapi`.
 
 What is dependency injection?
 -----------------------------
