@@ -1,17 +1,17 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import pytest
 
 from diwire import Container, Injected, Lifetime, Scope, resolver_context
 from diwire.exceptions import DIWireIntegrationError
+from diwire.integrations.typer import add_typer_context
 
 if TYPE_CHECKING:
     import typer
     from typer.testing import CliRunner
 
-click = pytest.importorskip("click")
 typer = pytest.importorskip("typer")
 
 
@@ -25,22 +25,10 @@ class _ContextInfoService:
         return f"{info_name}:{same}"
 
 
-def _get_typer_context() -> typer.Context:
-    try:
-        return cast("typer.Context", click.get_current_context())
-    except RuntimeError as error:
-        msg = "Typer context not available. Ensure the command runs inside a Typer application."
-        raise DIWireIntegrationError(msg) from error
-
-
 @pytest.fixture()
 def app() -> typer.Typer:
     container = Container()
-    container.add_factory(
-        _get_typer_context,
-        provides=typer.Context,
-        lifetime=Lifetime.TRANSIENT,
-    )
+    add_typer_context(container)
     container.add(
         _ContextInfoService,
         scope=Scope.REQUEST,
@@ -93,11 +81,7 @@ def test_context_resolve_in_service_for_command(runner: CliRunner, app: typer.Ty
 
 def test_context_resolution_raises_when_not_invoked_by_typer() -> None:
     container = Container()
-    container.add_factory(
-        _get_typer_context,
-        provides=typer.Context,
-        lifetime=Lifetime.TRANSIENT,
-    )
+    add_typer_context(container)
 
     with pytest.raises(DIWireIntegrationError, match="Typer context not available"):
         container.resolve(typer.Context)
