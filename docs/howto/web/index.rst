@@ -17,6 +17,7 @@ The common pattern is:
    :maxdepth: 1
 
    fastapi
+   aiohttp
    starlette
    flask
    django

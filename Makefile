@@ -1,4 +1,4 @@
-.PHONY: format lint test test-e2e-fastapi docs examples-readme benchmark benchmark-diwire benchmark-comparison benchmark-json benchmark-report benchmark-report-all benchmark-json-resolve benchmark-report-resolve
+.PHONY: format lint test test-e2e-fastapi test-e2e-aiohttp docs examples-readme benchmark benchmark-diwire benchmark-comparison benchmark-json benchmark-report benchmark-report-all benchmark-json-resolve benchmark-report-resolve
 
 format:
 	uv run ruff format .
@@ -17,6 +17,13 @@ test-e2e-fastapi:
 	docker compose -f tests/e2e/fastapi/docker-compose.yml up --build --abort-on-container-exit --exit-code-from tests; \
 	exit_code=$$?; \
 	docker compose -f tests/e2e/fastapi/docker-compose.yml down --volumes --remove-orphans; \
+	exit $$exit_code
+
+test-e2e-aiohttp:
+	@set +e; \
+	docker compose -f tests/e2e/aiohttp/docker-compose.yml up --build --abort-on-container-exit --exit-code-from tests; \
+	exit_code=$$?; \
+	docker compose -f tests/e2e/aiohttp/docker-compose.yml down --volumes --remove-orphans; \
 	exit $$exit_code
 
 test-all-pythons:
