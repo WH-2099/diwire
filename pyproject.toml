@@ -47,6 +47,7 @@ dev = [
     # Integration testing
     "aiohttp>=3.13.3",
     "celery[redis]>=5.5.3 ; python_version < '3.15'",
+    "flask>=3.1.2",
     "pydantic-settings>=2.12.0 ; python_version < '3.15'",
     "fastapi>=0.128.0 ; python_version < '3.15'",
     "sqlalchemy>=2.0.46",

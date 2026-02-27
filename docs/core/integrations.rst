@@ -38,15 +38,20 @@ functions from a root test container.
 
 Runnable example: :doc:`/howto/examples/pytest-plugin`.
 
-Web frameworks (FastAPI + aiohttp)
-----------------------------------
+Web frameworks (FastAPI + aiohttp + Flask)
+------------------------------------------
 
-diwire includes dedicated middleware/context integrations for both FastAPI and aiohttp.
-Use ``@resolver_context.inject(scope=Scope.REQUEST)`` on handlers/endpoints and install the
-framework-specific request context middleware plus ``add_request_context(container)``.
+diwire includes dedicated web integrations for FastAPI, aiohttp, and Flask.
+Use ``@resolver_context.inject(scope=Scope.REQUEST)`` on handlers/endpoints and register request
+access with ``add_request_context(container)``.
 
 See :doc:`/howto/web/fastapi`, :doc:`/howto/web/aiohttp`, and the runnable script
 :doc:`/howto/examples/fastapi`.
+
+FastAPI and aiohttp also require their request-context middleware to bind the active connection.
+Flask does not require middleware because the integration reads from Flask's request-local context.
+
+See :doc:`/howto/web/flask`.
 
 Celery tasks
 ------------

@@ -1,4 +1,4 @@
-.PHONY: format lint test test-e2e-fastapi test-e2e-aiohttp test-e2e-celery docs examples-readme benchmark benchmark-diwire benchmark-comparison benchmark-json benchmark-report benchmark-report-all benchmark-json-resolve benchmark-report-resolve
+.PHONY: format lint test test-e2e-fastapi test-e2e-aiohttp test-e2e-flask test-e2e-celery docs examples-readme benchmark benchmark-diwire benchmark-comparison benchmark-json benchmark-report benchmark-report-all benchmark-json-resolve benchmark-report-resolve
 
 format:
 	uv run ruff format .
@@ -24,6 +24,13 @@ test-e2e-aiohttp:
 	docker compose -f tests/e2e/aiohttp/docker-compose.yml up --build --abort-on-container-exit --exit-code-from tests; \
 	exit_code=$$?; \
 	docker compose -f tests/e2e/aiohttp/docker-compose.yml down --volumes --remove-orphans; \
+	exit $$exit_code
+
+test-e2e-flask:
+	@set +e; \
+	docker compose -f tests/e2e/flask/docker-compose.yml up --build --abort-on-container-exit --exit-code-from tests; \
+	exit_code=$$?; \
+	docker compose -f tests/e2e/flask/docker-compose.yml down --volumes --remove-orphans; \
 	exit $$exit_code
 
 test-e2e-celery:
