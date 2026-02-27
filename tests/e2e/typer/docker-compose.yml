@@ -1,0 +1,8 @@
+services:
+  tests:
+    build:
+      context: ../../..
+      dockerfile: tests/e2e/typer/Dockerfile
+    environment:
+      TYPER_E2E_ENABLED: "1"
+    command: ["uv", "run", "pytest", "tests/e2e/typer/tests/test_cli.py", "-q", "-ra"]
