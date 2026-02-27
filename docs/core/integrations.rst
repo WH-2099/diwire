@@ -1,5 +1,5 @@
 .. meta::
-   :description: Integrations and compatibility notes for diwire: supported constructor/field extraction, pydantic-settings, and the optional pytest plugin.
+   :description: Integrations and compatibility notes for diwire: supported constructor/field extraction, pydantic-settings, pytest plugin, web frameworks, and Celery tasks.
 
 Integrations
 ============
@@ -45,8 +45,19 @@ diwire includes dedicated web integrations for FastAPI, aiohttp, and Flask.
 Use ``@resolver_context.inject(scope=Scope.REQUEST)`` on handlers/endpoints and register request
 access with ``add_request_context(container)``.
 
+See :doc:`/howto/web/fastapi`, :doc:`/howto/web/aiohttp`, and the runnable script
+:doc:`/howto/examples/fastapi`.
+
 FastAPI and aiohttp also require their request-context middleware to bind the active connection.
 Flask does not require middleware because the integration reads from Flask's request-local context.
 
-See :doc:`/howto/web/fastapi`, :doc:`/howto/web/aiohttp`, :doc:`/howto/web/flask`, and the runnable
-script :doc:`/howto/examples/fastapi`.
+See :doc:`/howto/web/flask`.
+
+Celery tasks
+------------
+
+diwire supports Celery task injection without a dedicated adapter module.
+Use ``@resolver_context.inject(scope=Scope.REQUEST)`` directly on task functions
+and annotate dependencies as ``Injected[T]``.
+
+See :doc:`/howto/web/celery`.

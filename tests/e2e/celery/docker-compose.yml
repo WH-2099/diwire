@@ -1,0 +1,49 @@
+services:
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+      start_period: 2s
+
+  worker:
+    build:
+      context: ../../..
+      dockerfile: tests/e2e/celery/Dockerfile
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      CELERY_E2E_BROKER_URL: "redis://redis:6379/0"
+      CELERY_E2E_RESULT_BACKEND: "redis://redis:6379/1"
+      CELERY_E2E_QUEUE: "diwire-e2e"
+    command:
+      [
+        "uv",
+        "run",
+        "celery",
+        "-A",
+        "tests.e2e.celery.setup.app",
+        "worker",
+        "--loglevel=INFO",
+        "--concurrency=1",
+        "--queues=diwire-e2e",
+        "--without-mingle",
+        "--without-gossip",
+        "--without-heartbeat",
+      ]
+
+  tests:
+    build:
+      context: ../../..
+      dockerfile: tests/e2e/celery/Dockerfile
+    depends_on:
+      worker:
+        condition: service_started
+    environment:
+      CELERY_E2E_BROKER_URL: "redis://redis:6379/0"
+      CELERY_E2E_RESULT_BACKEND: "redis://redis:6379/1"
+      CELERY_E2E_QUEUE: "diwire-e2e"
+    command: ["uv", "run", "pytest", "tests/e2e/celery/tests/test_tasks.py", "-q", "-ra"]
