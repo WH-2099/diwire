@@ -38,10 +38,12 @@ functions from a root test container.
 
 Runnable example: :doc:`/howto/examples/pytest-plugin`.
 
-FastAPI
--------
+Web frameworks (FastAPI + aiohttp)
+----------------------------------
 
-diwire does not require a dedicated FastAPI integration module. The recommended pattern is to decorate endpoints with
-``@resolver_context.inject(scope=Scope.REQUEST)``.
+diwire includes dedicated middleware/context integrations for both FastAPI and aiohttp.
+Use ``@resolver_context.inject(scope=Scope.REQUEST)`` on handlers/endpoints and install the
+framework-specific request context middleware plus ``add_request_context(container)``.
 
-See :doc:`/howto/web/fastapi` and the runnable script :doc:`/howto/examples/fastapi`.
+See :doc:`/howto/web/fastapi`, :doc:`/howto/web/aiohttp`, and the runnable script
+:doc:`/howto/examples/fastapi`.

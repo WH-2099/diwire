@@ -28,7 +28,9 @@ _RESOLVER_CONTEXT_IMPORT_RE = re.compile(
     re.MULTILINE,
 )
 
-_OPTIONAL_DOC_DEPS: frozenset[str] = frozenset({"django", "fastapi", "flask", "starlette"})
+_OPTIONAL_DOC_DEPS: frozenset[str] = frozenset(
+    {"aiohttp", "django", "fastapi", "flask", "starlette"}
+)
 
 
 def _find_repo_root(start: Path) -> Path:
