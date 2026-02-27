@@ -1,49 +1,112 @@
 .. meta::
-   :description: Pattern for using diwire with Flask/WSGI: request scopes via @resolver_context.inject(scope=Scope.REQUEST) and request-bound dependencies.
+   :description: How to use diwire with Flask: request-scoped injection via add_request_context(container) and Injected[T] parameters without middleware.
+   :keywords: flask dependency injection, python dependency injection flask, request scope dependency injection
 
 Flask (WSGI)
 ============
 
-Flask is synchronous and commonly runs view functions in worker threads/processes. diwire works well in this
-environment with per-request scopes.
+Flask integration uses Flask's built-in request-local context and does not require middleware.
+You register request access once with ``add_request_context(container)``, then use
+``@resolver_context.inject(scope=Scope.REQUEST)`` on views.
 
-Recommended pattern
--------------------
+Minimal setup
+-------------
 
-1. Create a global container at app startup.
-2. Register request-scoped providers with ``Lifetime.SCOPED`` and ``scope=Scope.REQUEST``.
-3. Decorate views with ``@resolver_context.inject(scope=Scope.REQUEST)`` (the wrapper opens/closes a request scope per call).
+The integration consists of two pieces:
 
-Minimal sketch
---------------
+- :func:`diwire.integrations.flask.add_request_context` registers ``flask.Request`` in your
+  :class:`diwire.Container`.
+- :func:`diwire.integrations.flask.get_request` resolves the current request from Flask's
+  active request context and raises :class:`diwire.exceptions.DIWireIntegrationError` when used
+  outside a request.
 
 .. code-block:: python
 
-   from flask import Flask, Request, request
+   from flask import Flask, Request
 
    from diwire import Container, Injected, Lifetime, Scope, resolver_context
+   from diwire.integrations.flask import add_request_context
 
    app = Flask(__name__)
    container = Container()
 
-   container.add_factory(lambda: request, provides=Request, scope=Scope.REQUEST)
+   add_request_context(container)
 
 
-   class Service:
-       ...
+   class RequestService:
+       def run(self) -> str:
+           return "ok"
 
 
-   container.add(Service, provides=Service,
-       lifetime=Lifetime.SCOPED,
+   container.add(
+       RequestService,
+       provides=RequestService,
        scope=Scope.REQUEST,
+       lifetime=Lifetime.SCOPED,
    )
 
 
    @app.get("/health")
    @resolver_context.inject(scope=Scope.REQUEST)
-   def health(service: Injected[Service]) -> dict[str, bool]:
-       _ = service
-       return {"ok": True}
+   def health(service: Injected[RequestService]) -> dict[str, str]:
+       return {"status": service.run()}
 
-If you prefer managing scopes manually (for example, in ``before_request``/``teardown_request``), resolve dependencies
-from the active resolver returned by ``enter_scope(...)`` rather than relying on injected wrappers.
+Inject ``flask.Request`` in handlers and services
+-------------------------------------------------
+
+.. code-block:: python
+
+   from dataclasses import dataclass
+
+   from flask import Flask, Request
+
+   from diwire import Container, Injected, Lifetime, Scope, resolver_context
+   from diwire.integrations.flask import add_request_context
+
+   app = Flask(__name__)
+   container = Container()
+   add_request_context(container)
+
+
+   @dataclass
+   class RequestPathService:
+       request: Request
+
+       def path(self) -> str:
+           return self.request.path
+
+
+   container.add(
+       RequestPathService,
+       provides=RequestPathService,
+       scope=Scope.REQUEST,
+       lifetime=Lifetime.SCOPED,
+   )
+
+
+   @app.get("/path")
+   @resolver_context.inject(scope=Scope.REQUEST)
+   def path_handler(
+       request: Injected[Request],
+       service: Injected[RequestPathService],
+   ) -> dict[str, str]:
+       return {
+           "direct_path": request.path,
+           "service_path": service.path(),
+       }
+
+How it works
+------------
+
+1. Flask opens a request context and exposes ``flask.request`` as a request-local proxy.
+2. ``@resolver_context.inject(scope=Scope.REQUEST)`` opens a request scope, resolves
+   ``Injected[...]`` parameters, and calls your view.
+3. ``add_request_context(container)`` makes ``flask.Request`` resolvable by reading the active
+   Flask request proxy.
+4. When the view returns, the injected wrapper closes the request scope and runs scoped cleanup.
+
+Testing
+-------
+
+- In-process tests: use ``app.test_client()`` and call ``add_request_context(container)`` in app setup.
+- End-to-end (Docker Compose): run ``make test-e2e-flask``.
