@@ -12,6 +12,110 @@ diwire is a dependency injection container for Python 3.10+ that builds your obj
 scopes + deterministic cleanup, async resolution, open generics, fast steady-state resolution via compiled
 resolvers, and free-threaded Python (no-GIL) — all with zero runtime dependencies.
 
+## Installation
+
+```bash
+uv add diwire
+```
+
+```bash
+pip install diwire
+```
+
+## FastAPI quick start (request scope + resolver_context)
+
+FastAPI already has its own dependency system, but diwire is useful when you want:
+
+- a single typed object graph shared across your app
+- request scopes with deterministic cleanup (generator/async-generator providers)
+- plain constructor injection for domain/services (not `Depends` everywhere)
+
+This example shows:
+
+- one app-level `Container()`
+- a per-request `Scope.REQUEST`
+- a small nested graph `UserService -> UserRepository -> DbSession`
+- injecting the active `Request` into a service (middleware-powered)
+
+```python
+from __future__ import annotations
+
+from collections.abc import Generator
+from dataclasses import dataclass, field
+
+from fastapi import FastAPI
+from starlette.requests import Request
+
+from diwire import Container, Injected, Lifetime, Scope, resolver_context
+from diwire.integrations.fastapi import RequestContextMiddleware, add_request_context
+
+
+@dataclass(slots=True)
+class DbSession:
+    closed: bool = field(default=False, init=False)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def provide_db_session() -> Generator[DbSession, None, None]:
+    session = DbSession()
+    try:
+        yield session
+    finally:
+        session.close()
+
+
+class UserRepository:
+    def __init__(self, session: DbSession) -> None:
+        self._session = session
+
+    def get_name(self, user_id: int) -> str:
+        _ = self._session
+        return f"user-{user_id}"
+
+
+class UserService:
+    def __init__(self, repo: UserRepository, request: Request) -> None:
+        self._repo = repo
+        self._request = request
+
+    def get_user(self, user_id: int) -> dict[str, int | str]:
+        return {
+            "id": user_id,
+            "name": self._repo.get_name(user_id),
+            "path": self._request.url.path,
+        }
+
+
+app = FastAPI()
+app.add_middleware(RequestContextMiddleware)
+
+container = Container()
+add_request_context(container)
+
+container.add_generator(provide_db_session, provides=DbSession, scope=Scope.REQUEST, lifetime=Lifetime.SCOPED)
+container.add(UserRepository, scope=Scope.REQUEST, lifetime=Lifetime.SCOPED)
+container.add(UserService, scope=Scope.REQUEST, lifetime=Lifetime.SCOPED)
+container.compile()  # optional, but recommended for stable hot-path performance
+
+
+@app.get("/users/{user_id}")
+@resolver_context.inject(scope=Scope.REQUEST)
+def get_user(user_id: int, service: Injected[UserService]) -> dict[str, int | str]:
+    return service.get_user(user_id)
+```
+
+Decorator order matters: apply `@resolver_context.inject(...)` *below* the FastAPI decorator so FastAPI sees the
+injected wrapper signature (`Injected[...]` parameters are removed from the public signature).
+
+Run it:
+
+```bash
+pip install diwire fastapi uvicorn
+uvicorn main:app --reload
+```
+
 ## Why diwire
 
 - **Zero runtime dependencies**: easy to adopt anywhere. ([Why diwire](https://docs.diwire.dev/why-diwire.html))
@@ -37,17 +141,7 @@ For quick local regression checks, run ``make benchmark`` (diwire-only).
 For full cross-library runs, use ``make benchmark-comparison`` (raw suite) or
 ``make benchmark-report`` / ``make benchmark-report-resolve`` (report artifacts).
 
-## Installation
-
-```bash
-uv add diwire
-```
-
-```bash
-pip install diwire
-```
-
-## Quick start (auto-wiring)
+## Quick start (pure Python auto-wiring)
 
 Define your classes. Resolve the top-level one. diwire figures out the rest.
 

@@ -5,8 +5,12 @@ Core concepts
 =============
 
 This section is the mental model behind diwire.
-If you prefer learning by doing, start with the :doc:`../howto/examples/index` tutorial and use these pages as the
-"why it works" reference.
+If you prefer learning by doing:
+
+- For FastAPI: start with :doc:`../quickstart-fastapi`
+- For plain Python: start with the :doc:`../howto/examples/index` tutorial
+
+Use these pages as the "why it works" reference.
 
 Recommended order
 -----------------

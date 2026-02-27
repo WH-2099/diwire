@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
 
+import pytest
+
 
 @dataclass(frozen=True, slots=True)
 class CodeBlock:
@@ -126,6 +128,8 @@ def _module_for_exec(*, module_name: str, doc_path: Path) -> ModuleType:
 REPO_ROOT = _find_repo_root(Path(__file__).resolve())
 README_PATH = REPO_ROOT / "README.md"
 
+_OPTIONAL_README_DEPS: frozenset[str] = frozenset({"fastapi", "starlette"})
+
 
 def test_repo_readme_python_code_blocks_execute() -> None:
     blocks = _extract_python_code_blocks(README_PATH)
@@ -146,6 +150,17 @@ def test_repo_readme_python_code_blocks_execute() -> None:
     try:
         compiled = compile(script, filename=str(README_PATH), mode="exec")
         exec(compiled, module.__dict__)  # noqa: S102
+    except ModuleNotFoundError as exc:
+        missing = (exc.name or "").split(".", 1)[0]
+        if missing in _OPTIONAL_README_DEPS:
+            pytest.skip(f"README.md requires optional dependency: {missing}")
+        msg = _execution_failure_message(
+            doc_path=README_PATH,
+            repo_root=REPO_ROOT,
+            markers=markers,
+            exc=exc,
+        )
+        raise AssertionError(msg) from exc
     except Exception as exc:
         msg = _execution_failure_message(
             doc_path=README_PATH,
