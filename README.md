@@ -34,14 +34,14 @@ This example shows:
 
 - one app-level `Container()`
 - a per-request `Scope.REQUEST`
-- a nested graph `UserService -> UserRepository -> DbSession`
-- injecting the active `Request` into a service via `RequestContextMiddleware`
+- a small nested graph `UserService -> UserRepository -> DbSession`
+- injecting the active `Request` into a service (middleware-powered)
 
 ```python
 from __future__ import annotations
 
 from collections.abc import Generator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from diwire import Container, Injected, Lifetime, Scope, resolver_context
 
@@ -58,23 +58,14 @@ except ModuleNotFoundError:
 
 @dataclass(slots=True)
 class DbSession:
-    request_id: str
-    closed: bool = False
+    closed: bool = field(default=False, init=False)
 
     def close(self) -> None:
         self.closed = True
 
 
-class AuditService:
-    def __init__(self, request: Request) -> None:
-        self._request = request
-
-    def request_id(self) -> str:
-        return self._request.headers.get("x-request-id", "missing")
-
-
-def provide_db_session(audit: AuditService) -> Generator[DbSession, None, None]:
-    session = DbSession(request_id=audit.request_id())
+def provide_db_session() -> Generator[DbSession, None, None]:
+    session = DbSession()
     try:
         yield session
     finally:
@@ -85,21 +76,21 @@ class UserRepository:
     def __init__(self, session: DbSession) -> None:
         self._session = session
 
-    def get_name(self, user_id: int) -> str:
+    def get_name(self, user_id: int) -> str:  # pragma: no cover - demo method
         _ = self._session
         return f"user-{user_id}"
 
 
 class UserService:
-    def __init__(self, repo: UserRepository, audit: AuditService) -> None:
+    def __init__(self, repo: UserRepository, request: Request) -> None:
         self._repo = repo
-        self._audit = audit
+        self._request = request
 
     def get_user(self, user_id: int) -> dict[str, int | str]:
         return {
             "id": user_id,
             "name": self._repo.get_name(user_id),
-            "request_id": self._audit.request_id(),
+            "path": self._request.url.path,
         }
 
 
@@ -116,7 +107,6 @@ if FastAPI is not None:
         scope=Scope.REQUEST,
         lifetime=Lifetime.SCOPED,
     )
-    container.add(AuditService, scope=Scope.REQUEST, lifetime=Lifetime.SCOPED)
     container.add(UserRepository, scope=Scope.REQUEST, lifetime=Lifetime.SCOPED)
     container.add(UserService, scope=Scope.REQUEST, lifetime=Lifetime.SCOPED)
     container.compile()  # optional, but recommended for stable hot-path performance
