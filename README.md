@@ -43,17 +43,11 @@ from __future__ import annotations
 from collections.abc import Generator
 from dataclasses import dataclass, field
 
+from fastapi import FastAPI
+from starlette.requests import Request
+
 from diwire import Container, Injected, Lifetime, Scope, resolver_context
-
-try:
-    from fastapi import FastAPI
-    from starlette.requests import Request
-
-    from diwire.integrations.fastapi import RequestContextMiddleware, add_request_context
-except ModuleNotFoundError:
-    # README snippets are executed in CI across many Python versions.
-    # FastAPI/Starlette aren't installed (or available) on all of them.
-    FastAPI = None  # type: ignore[assignment]
+from diwire.integrations.fastapi import RequestContextMiddleware, add_request_context
 
 
 @dataclass(slots=True)
@@ -76,7 +70,7 @@ class UserRepository:
     def __init__(self, session: DbSession) -> None:
         self._session = session
 
-    def get_name(self, user_id: int) -> str:  # pragma: no cover - demo method
+    def get_name(self, user_id: int) -> str:
         _ = self._session
         return f"user-{user_id}"
 
@@ -94,27 +88,22 @@ class UserService:
         }
 
 
-if FastAPI is not None:
-    app = FastAPI()
-    app.add_middleware(RequestContextMiddleware)
+app = FastAPI()
+app.add_middleware(RequestContextMiddleware)
 
-    container = Container()
-    add_request_context(container)
+container = Container()
+add_request_context(container)
 
-    container.add_generator(
-        provide_db_session,
-        provides=DbSession,
-        scope=Scope.REQUEST,
-        lifetime=Lifetime.SCOPED,
-    )
-    container.add(UserRepository, scope=Scope.REQUEST, lifetime=Lifetime.SCOPED)
-    container.add(UserService, scope=Scope.REQUEST, lifetime=Lifetime.SCOPED)
-    container.compile()  # optional, but recommended for stable hot-path performance
+container.add_generator(provide_db_session, provides=DbSession, scope=Scope.REQUEST, lifetime=Lifetime.SCOPED)
+container.add(UserRepository, scope=Scope.REQUEST, lifetime=Lifetime.SCOPED)
+container.add(UserService, scope=Scope.REQUEST, lifetime=Lifetime.SCOPED)
+container.compile()  # optional, but recommended for stable hot-path performance
 
-    @app.get("/users/{user_id}")
-    @resolver_context.inject(scope=Scope.REQUEST)
-    def get_user(user_id: int, service: Injected[UserService]) -> dict[str, int | str]:
-        return service.get_user(user_id)
+
+@app.get("/users/{user_id}")
+@resolver_context.inject(scope=Scope.REQUEST)
+def get_user(user_id: int, service: Injected[UserService]) -> dict[str, int | str]:
+    return service.get_user(user_id)
 ```
 
 Decorator order matters: apply `@resolver_context.inject(...)` *below* the FastAPI decorator so FastAPI sees the
