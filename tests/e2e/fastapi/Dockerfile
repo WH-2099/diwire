@@ -8,7 +8,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends git \
     && rm -rf /var/lib/apt/lists/*
 
-RUN rm -f .git \
+RUN rm -rf .git \
     && git init \
     && git config user.email "ci@example.com" \
     && git config user.name "CI" \
