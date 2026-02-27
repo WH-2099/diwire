@@ -1,5 +1,5 @@
 .. meta::
-   :description: Integrations and compatibility notes for diwire: supported constructor/field extraction, pydantic-settings, and the optional pytest plugin.
+   :description: Integrations and compatibility notes for diwire: supported constructor/field extraction, pydantic-settings, pytest plugin, web frameworks, and Celery tasks.
 
 Integrations
 ============
@@ -47,3 +47,12 @@ framework-specific request context middleware plus ``add_request_context(contain
 
 See :doc:`/howto/web/fastapi`, :doc:`/howto/web/aiohttp`, and the runnable script
 :doc:`/howto/examples/fastapi`.
+
+Celery tasks
+------------
+
+diwire supports Celery task injection without a dedicated adapter module.
+Use ``@resolver_context.inject(scope=Scope.REQUEST)`` directly on task functions
+and annotate dependencies as ``Injected[T]``.
+
+See :doc:`/howto/web/celery`.
