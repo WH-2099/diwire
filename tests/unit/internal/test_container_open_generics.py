@@ -11,32 +11,60 @@ from types import SimpleNamespace
 from typing import Annotated, Any, Generic, TypeVar, cast
 
 import pytest
+from typing_extensions import TypeVar as TypeVarExt
 
 from diwire import (
+    All,
     Component,
     Container,
+    DependencyRegistrationPolicy,
     Injected,
     Lifetime,
     LockMode,
+    Maybe,
+    Provider,
     ResolverContext,
     Scope,
     resolver_context,
 )
 from diwire._internal.injection import INJECT_WRAPPER_MARKER
-from diwire._internal.providers import ProviderDependency
+from diwire._internal.providers import ProviderDependency, ProviderSpec
 from diwire.exceptions import (
     DIWireAsyncDependencyInSyncContextError,
     DIWireDependencyNotRegisteredError,
     DIWireInvalidGenericTypeArgumentError,
+    DIWireInvalidRegistrationError,
     DIWireScopeMismatchError,
 )
 
 T = TypeVar("T")
 U = TypeVar("U")
+DefaultT = TypeVarExt("DefaultT", default=str)
+AutoDefaultT = TypeVarExt("AutoDefaultT", default=str)
 
 
 class _IBox(Generic[T]):
     pass
+
+
+@dataclass
+class _DefaultBox(Generic[DefaultT]):
+    type: type[DefaultT]
+
+
+@dataclass
+class _UsesDefaultBox:
+    box: _DefaultBox
+
+
+class _AutoOpen(Generic[AutoDefaultT]):
+    def __init__(self, source: str = "concrete") -> None:
+        self.source = source
+
+
+@dataclass
+class _UsesAutoOpen:
+    dep: _AutoOpen
 
 
 @dataclass(slots=True, kw_only=True)
@@ -81,6 +109,14 @@ class _SpecialIntBox(_IBox[int]):
 
 def _create_box(type_arg: type[T]) -> _IBox[T]:
     return _Box(type=type_arg)
+
+
+def _create_default_box(type_arg: type[DefaultT]) -> _DefaultBox[DefaultT]:
+    return _DefaultBox(type=type_arg)
+
+
+def _create_auto_open(type_arg: type[AutoDefaultT]) -> _AutoOpen[AutoDefaultT]:
+    return _AutoOpen(source=f"factory-{type_arg.__name__}")
 
 
 def _create_box_positional_only(type_arg: type[T], /) -> _IBox[T]:
@@ -622,6 +658,433 @@ def test_resolving_open_generic_without_type_arguments_remains_unregistered() ->
 
     with pytest.raises(DIWireDependencyNotRegisteredError):
         container.resolve(_IBox)
+
+
+def test_resolving_open_generic_without_type_arguments_uses_typevar_defaults() -> None:
+    container = Container()
+    container.add_factory(_create_default_box, provides=_DefaultBox)
+
+    default_resolved = container.resolve(_DefaultBox)
+    explicit_resolved = container.resolve(_DefaultBox[int])
+
+    assert isinstance(default_resolved, _DefaultBox)
+    assert default_resolved.type is str
+    assert isinstance(explicit_resolved, _DefaultBox)
+    assert explicit_resolved.type is int
+    assert container._providers_registrations.find_by_type(_DefaultBox[str]) is not None
+
+
+def test_open_generic_default_typevar_dependency_resolves_for_registered_provider() -> None:
+    container = Container()
+    container.add_factory(_create_default_box, provides=_DefaultBox)
+    container.add(_UsesDefaultBox)
+
+    resolved = container.resolve(_UsesDefaultBox)
+
+    assert isinstance(resolved, _UsesDefaultBox)
+    assert isinstance(resolved.box, _DefaultBox)
+    assert resolved.box.type is str
+
+
+def test_open_generic_default_typevar_dependency_resolves_for_autoregistered_provider() -> None:
+    container = Container()
+    container.add_factory(_create_default_box, provides=_DefaultBox)
+
+    resolved = container.resolve(_UsesDefaultBox)
+
+    assert isinstance(resolved, _UsesDefaultBox)
+    assert isinstance(resolved.box, _DefaultBox)
+    assert resolved.box.type is str
+
+
+def test_open_generic_dependency_autoregistration_does_not_override_open_registration() -> None:
+    container = Container()
+    container.add_factory(_create_auto_open, provides=_AutoOpen)
+
+    resolved = container.resolve(_UsesAutoOpen)
+
+    assert isinstance(resolved, _UsesAutoOpen)
+    assert isinstance(resolved.dep, _AutoOpen)
+    assert resolved.dep.source == "factory-str"
+
+
+def test_open_generic_materialization_dependency_key_handles_markers() -> None:
+    container = Container()
+
+    assert container._open_generic_materialization_dependency_key(Maybe[_IBox[int]]) == _IBox[int]
+    assert (
+        container._open_generic_materialization_dependency_key(Provider[_IBox[int]]) == _IBox[int]
+    )
+    assert container._open_generic_materialization_dependency_key(All[_IBox[int]]) is None
+
+
+def test_materialize_registered_open_generic_dependencies_covers_no_match_and_all_marker() -> None:
+    container = Container()
+    container.add_factory(_create_box, provides=_IBox)
+
+    @dataclass
+    class _UsesAllBox:
+        items: All[_IBox[Any]]
+
+    @dataclass
+    class _UsesUnmatchedDependency:
+        value: _DefaultBox
+
+    container.add(
+        _UsesAllBox,
+        dependency_registration_policy=DependencyRegistrationPolicy.IGNORE,
+    )
+    container.add(
+        _UsesUnmatchedDependency,
+        dependency_registration_policy=DependencyRegistrationPolicy.IGNORE,
+    )
+
+    container._materialize_registered_open_generic_dependencies()
+
+    assert container._providers_registrations.find_by_type(_DefaultBox) is None
+
+
+def test_materialize_registered_open_generic_dependencies_materializes_and_rechecks() -> None:
+    container = Container()
+    container.add_factory(_create_default_box, provides=_DefaultBox)
+    container.add(
+        _UsesDefaultBox,
+        dependency_registration_policy=DependencyRegistrationPolicy.IGNORE,
+    )
+
+    assert container._providers_registrations.find_by_type(_DefaultBox) is None
+
+    container._materialize_registered_open_generic_dependencies()
+
+    assert container._providers_registrations.find_by_type(_DefaultBox) is not None
+
+
+def test_materialize_registered_open_generic_dependencies_reiterates_after_materialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = Container()
+
+    @dataclass
+    class _NeedsStr:
+        value: str
+        mirror: str
+
+    container.add(
+        _NeedsStr,
+        dependency_registration_policy=DependencyRegistrationPolicy.IGNORE,
+    )
+
+    materialization_marker = object()
+    materialization_calls = 0
+
+    monkeypatch.setattr(container._open_generic_registry, "has_specs", lambda: True)
+
+    def _find_best_match(dependency: Any) -> Any:
+        if dependency is str and container._providers_registrations.find_by_type(str) is None:
+            return materialization_marker
+        return None
+
+    monkeypatch.setattr(container._open_generic_registry, "find_best_match", _find_best_match)
+
+    def _materialize(dependency: Any, match: Any) -> None:
+        nonlocal materialization_calls
+        materialization_calls += 1
+        assert dependency is str
+        assert match is materialization_marker
+        container.add_instance("materialized", provides=str)
+
+    monkeypatch.setattr(container, "_materialize_closed_open_generic_spec", _materialize)
+
+    container._materialize_registered_open_generic_dependencies()
+
+    assert materialization_calls == 1
+    assert container._providers_registrations.find_by_type(str) is not None
+
+
+def test_materialize_registered_open_generic_dependencies_raises_on_non_converging_growth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = Container()
+
+    @dataclass
+    class _NeedsDependency:
+        value: str
+
+    container.add(
+        _NeedsDependency,
+        dependency_registration_policy=DependencyRegistrationPolicy.IGNORE,
+    )
+
+    materialization_marker = object()
+    dependency_counter = 0
+    materialized_dependencies: list[Any] = []
+
+    monkeypatch.setattr(container, "_OPEN_GENERIC_MATERIALIZATION_MAX_ITERATIONS", 5, raising=False)
+    monkeypatch.setattr(container._open_generic_registry, "has_specs", lambda: True)
+    monkeypatch.setattr(container, "_purge_runtime_materialized_closed_specs", lambda: None)
+    monkeypatch.setattr(
+        container._open_generic_registry,
+        "find_best_match",
+        lambda _dependency: materialization_marker,
+    )
+
+    def _dependency_key(_dependency: Any) -> Any:
+        nonlocal dependency_counter
+        dependency_counter += 1
+        dependency = cast("Any", type(f"_SyntheticDependency{dependency_counter}", (), {}))
+        materialized_dependencies.append(dependency)
+        return dependency
+
+    monkeypatch.setattr(container, "_open_generic_materialization_dependency_key", _dependency_key)
+
+    def _materialize(dependency: Any, match: Any) -> None:
+        assert match is materialization_marker
+        container.add_instance(object(), provides=dependency)
+        container._runtime_materialized_closed_keys.add(dependency)
+
+    monkeypatch.setattr(container, "_materialize_closed_open_generic_spec", _materialize)
+
+    with pytest.raises(DIWireInvalidRegistrationError, match="did not converge") as error_info:
+        container._materialize_registered_open_generic_dependencies()
+
+    message = str(error_info.value)
+    assert "_open_generic_materialization_dependency_key" in message
+    assert "_materialize_closed_open_generic_spec" in message
+    assert "_providers_registrations" in message
+    assert "_open_generic_registry" in message
+    for dependency in materialized_dependencies:
+        assert container._providers_registrations.find_by_type(dependency) is None
+        assert dependency not in container._runtime_materialized_closed_keys
+
+
+def test_materialize_registered_open_generic_dependencies_no_growth_rechecks_remaining_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = Container()
+
+    @dataclass
+    class _NeedsTwoDependencies:
+        first: str
+        second: int
+
+    container.add(
+        _NeedsTwoDependencies,
+        dependency_registration_policy=DependencyRegistrationPolicy.IGNORE,
+    )
+
+    materialization_marker = object()
+    materialized_dependencies: list[Any] = []
+
+    monkeypatch.setattr(container._open_generic_registry, "has_specs", lambda: True)
+    monkeypatch.setattr(
+        container._open_generic_registry,
+        "find_best_match",
+        lambda _dependency: materialization_marker,
+    )
+
+    def _materialize(dependency: Any, match: Any) -> None:
+        assert match is materialization_marker
+        materialized_dependencies.append(dependency)
+
+    monkeypatch.setattr(container, "_materialize_closed_open_generic_spec", _materialize)
+
+    container._materialize_registered_open_generic_dependencies()
+
+    assert materialized_dependencies == [str, int]
+
+
+def test_materialize_registered_open_generic_dependencies_raises_on_repeated_growth_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = Container()
+
+    @dataclass
+    class _NeedsDependency:
+        value: str
+
+    container.add(
+        _NeedsDependency,
+        dependency_registration_policy=DependencyRegistrationPolicy.IGNORE,
+    )
+
+    provider_spec = next(iter(container._providers_registrations.values()))
+    values_call_counter = 0
+    values_len_pattern = (1, 1, 1, 2, 1)
+    materialization_marker = object()
+    materialized_dependencies: list[Any] = []
+
+    def _values() -> list[Any]:
+        nonlocal values_call_counter
+        values_len = values_len_pattern[values_call_counter % len(values_len_pattern)]
+        values_call_counter += 1
+        if values_len == 1:
+            return [provider_spec]
+        return [provider_spec, provider_spec]
+
+    monkeypatch.setattr(container._providers_registrations, "values", _values)
+    monkeypatch.setattr(container._open_generic_registry, "has_specs", lambda: True)
+    monkeypatch.setattr(container, "_purge_runtime_materialized_closed_specs", lambda: None)
+    monkeypatch.setattr(
+        container._open_generic_registry,
+        "find_best_match",
+        lambda _dependency: materialization_marker,
+    )
+
+    class _SyntheticDependency:
+        def __repr__(self) -> str:
+            return "_SyntheticDependency"
+
+    def _dependency_key(_dependency: Any) -> Any:
+        dependency = _SyntheticDependency()
+        materialized_dependencies.append(dependency)
+        return dependency
+
+    monkeypatch.setattr(container, "_open_generic_materialization_dependency_key", _dependency_key)
+
+    def _materialize(dependency: Any, _match: Any) -> None:
+        materialized_spec = ProviderSpec(
+            provides=dependency,
+            instance=object(),
+            dependencies=[],
+            is_async=False,
+            is_any_dependency_async=False,
+            needs_cleanup=False,
+            lock_mode="auto",
+            scope=container._root_scope,
+        )
+        container._providers_registrations._registrations_by_type[dependency] = materialized_spec
+        container._providers_registrations._registrations_by_slot[materialized_spec.slot] = (
+            materialized_spec
+        )
+        container._runtime_materialized_closed_keys.add(dependency)
+
+    monkeypatch.setattr(container, "_materialize_closed_open_generic_spec", _materialize)
+
+    with pytest.raises(DIWireInvalidRegistrationError, match="repeated_iteration_state"):
+        container._materialize_registered_open_generic_dependencies()
+
+    assert container._providers_registrations.find_by_type(_NeedsDependency) is not None
+    for dependency in materialized_dependencies:
+        assert container._providers_registrations.find_by_type(dependency) is None
+        assert dependency not in container._runtime_materialized_closed_keys
+
+
+def test_materialize_registered_open_generic_dependencies_deduplicates_tracked_growth_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = Container()
+
+    @dataclass
+    class _NeedsDependency:
+        value: str
+
+    container.add(
+        _NeedsDependency,
+        dependency_registration_policy=DependencyRegistrationPolicy.IGNORE,
+    )
+
+    provider_spec = next(iter(container._providers_registrations.values()))
+    values_call_counter = 0
+    values_len_pattern = (1, 1, 1, 2, 1)
+    materialization_marker = object()
+    rollback_calls: list[tuple[list[Any], list[Any]]] = []
+    original_rollback = container._rollback_open_generic_materialization
+
+    def _values() -> list[Any]:
+        nonlocal values_call_counter
+        values_len = values_len_pattern[values_call_counter % len(values_len_pattern)]
+        values_call_counter += 1
+        if values_len == 1:
+            return [provider_spec]
+        return [provider_spec, provider_spec]
+
+    def _rollback(
+        *, materialized_registration_keys: list[Any], materialized_closed_keys: list[Any]
+    ) -> None:
+        rollback_calls.append(
+            (list(materialized_registration_keys), list(materialized_closed_keys))
+        )
+        original_rollback(
+            materialized_registration_keys=materialized_registration_keys,
+            materialized_closed_keys=materialized_closed_keys,
+        )
+
+    monkeypatch.setattr(container._providers_registrations, "values", _values)
+    monkeypatch.setattr(container._open_generic_registry, "has_specs", lambda: True)
+    monkeypatch.setattr(
+        container._open_generic_registry,
+        "find_best_match",
+        lambda _dependency: materialization_marker,
+    )
+    monkeypatch.setattr(
+        container, "_open_generic_materialization_dependency_key", lambda _dependency: str
+    )
+    monkeypatch.setattr(container, "_materialize_closed_open_generic_spec", lambda *_args: None)
+    monkeypatch.setattr(container, "_rollback_open_generic_materialization", _rollback)
+
+    with pytest.raises(DIWireInvalidRegistrationError, match="repeated_iteration_state"):
+        container._materialize_registered_open_generic_dependencies()
+
+    assert rollback_calls == [([str], [])]
+
+
+def test_rollback_open_generic_materialization_is_noop_when_nothing_tracked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = Container()
+
+    @dataclass
+    class _Service:
+        value: str
+
+    container.add(_Service, dependency_registration_policy=DependencyRegistrationPolicy.IGNORE)
+    original_registrations = container._providers_registrations
+    invalidate_calls = 0
+
+    def _invalidate() -> None:
+        nonlocal invalidate_calls
+        invalidate_calls += 1
+
+    monkeypatch.setattr(container, "_invalidate_compilation", _invalidate)
+
+    container._rollback_open_generic_materialization(
+        materialized_registration_keys=[],
+        materialized_closed_keys=[],
+    )
+
+    assert container._providers_registrations is original_registrations
+    assert invalidate_calls == 0
+
+
+def test_rollback_open_generic_materialization_discards_closed_keys_without_rebuilding_providers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = Container()
+
+    @dataclass
+    class _Service:
+        value: str
+
+    container.add(_Service, dependency_registration_policy=DependencyRegistrationPolicy.IGNORE)
+    original_registrations = container._providers_registrations
+    materialized_key = object()
+    container._runtime_materialized_closed_keys.add(materialized_key)
+    invalidate_calls = 0
+
+    def _invalidate() -> None:
+        nonlocal invalidate_calls
+        invalidate_calls += 1
+
+    monkeypatch.setattr(container, "_invalidate_compilation", _invalidate)
+
+    container._rollback_open_generic_materialization(
+        materialized_registration_keys=[],
+        materialized_closed_keys=[materialized_key],
+    )
+
+    assert container._providers_registrations is original_registrations
+    assert materialized_key not in container._runtime_materialized_closed_keys
+    assert invalidate_calls == 1
 
 
 def test_autoregister_skips_open_generic_dependencies_when_match_exists() -> None:

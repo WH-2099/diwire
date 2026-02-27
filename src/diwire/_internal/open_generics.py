@@ -7,8 +7,8 @@ import threading
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
-from types import TracebackType
-from typing import TYPE_CHECKING, Any, Literal, NoReturn, TypeVar, cast, get_args, get_origin
+from types import TracebackType, UnionType
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, TypeVar, Union, cast, get_args, get_origin
 
 from diwire._internal.injection import INJECT_RESOLVER_KWARG, INJECT_WRAPPER_MARKER
 from diwire._internal.lock_mode import LockMode
@@ -47,6 +47,7 @@ _MISSING_CACHE = object()
 _MAYBE_UNHANDLED = object()
 _UNSET_CACHE = object()
 logger = logging.getLogger(__name__)
+_MISSING_TYPEVAR_DEFAULT = object()
 
 
 @dataclass(frozen=True, slots=True)
@@ -296,13 +297,14 @@ class _OpenGenericRegistry:
         return spec
 
     def find_best_match(self, dependency: Any) -> _OpenGenericMatch | None:
-        if not _is_closed_generic_dependency(dependency):
+        closed_dependency = _close_generic_dependency_with_typevar_defaults(dependency)
+        if not _is_closed_generic_dependency(closed_dependency):
             return None
 
         matches: list[_OpenGenericMatch] = []
         validation_error: DIWireInvalidGenericTypeArgumentError | None = None
         for spec in self._specs_by_key.values():
-            typevar_map = _match_typevars(template=spec.canonical_key, concrete=dependency)
+            typevar_map = _match_typevars(template=spec.canonical_key, concrete=closed_dependency)
             if typevar_map is None:
                 continue
 
@@ -653,7 +655,9 @@ class _OpenGenericResolver:  # pragma: no cover
         dependency: Any,
         missing_error: DIWireDependencyNotRegisteredError,
     ) -> Any:
-        normalized_dependency = strip_non_component_annotation(dependency)
+        normalized_dependency = _close_generic_dependency_with_typevar_defaults(
+            strip_non_component_annotation(dependency),
+        )
         if normalized_dependency is not dependency:
             try:
                 return self._base_resolver.resolve(normalized_dependency)
@@ -680,7 +684,9 @@ class _OpenGenericResolver:  # pragma: no cover
         dependency: Any,
         missing_error: DIWireDependencyNotRegisteredError,
     ) -> Any:
-        normalized_dependency = strip_non_component_annotation(dependency)
+        normalized_dependency = _close_generic_dependency_with_typevar_defaults(
+            strip_non_component_annotation(dependency),
+        )
         if normalized_dependency is not dependency:
             try:
                 return await self._base_resolver.aresolve(normalized_dependency)
@@ -703,7 +709,9 @@ class _OpenGenericResolver:  # pragma: no cover
 
     def _is_registered_dependency(self, dependency: Any) -> bool:
         base_registered_checker = getattr(self._base_resolver, "_is_registered_dependency", None)
-        normalized_dependency = strip_non_component_annotation(dependency)
+        normalized_dependency = _close_generic_dependency_with_typevar_defaults(
+            strip_non_component_annotation(dependency),
+        )
         if callable(base_registered_checker):
             if base_registered_checker(dependency):
                 return True
@@ -1305,11 +1313,15 @@ class _OpenGenericResolver:  # pragma: no cover
         dependency: Any,
         normalized_dependency: Any,
     ) -> _OpenGenericDispatchEntry | None:
-        open_match = self._registry.find_best_match(dependency)
-        match_dependency = dependency
+        closed_dependency = _close_generic_dependency_with_typevar_defaults(dependency)
+        open_match = self._registry.find_best_match(closed_dependency)
+        match_dependency = closed_dependency
         if open_match is None and normalized_dependency is not dependency:
-            open_match = self._registry.find_best_match(normalized_dependency)
-            match_dependency = normalized_dependency
+            closed_normalized_dependency = _close_generic_dependency_with_typevar_defaults(
+                normalized_dependency,
+            )
+            open_match = self._registry.find_best_match(closed_normalized_dependency)
+            match_dependency = closed_normalized_dependency
         if open_match is None:
             return None
         dispatch_entry = _OpenGenericDispatchEntry(
@@ -1877,6 +1889,46 @@ def _is_closed_generic_dependency(dependency: Any) -> bool:
     return not any(contains_typevar(argument) for argument in arguments)
 
 
+def _close_generic_dependency_with_typevar_defaults(dependency: Any) -> Any:
+    origin = get_origin(dependency)
+    if origin is not None:
+        return dependency
+
+    parameters = tuple(
+        parameter
+        for parameter in getattr(dependency, "__parameters__", ())
+        if isinstance(parameter, TypeVar)
+    )
+    if not parameters:
+        return dependency
+
+    default_arguments: list[Any] = []
+    for parameter in parameters:
+        default_argument = _typevar_default_or_missing(parameter)
+        if default_argument is _MISSING_TYPEVAR_DEFAULT:
+            return dependency
+        default_arguments.append(default_argument)
+
+    closed_dependency = _rebuild_alias(
+        origin=dependency,
+        args=tuple(default_arguments),
+        fallback=dependency,
+    )
+    if contains_typevar(closed_dependency):
+        return dependency
+    return closed_dependency
+
+
+def _typevar_default_or_missing(typevar: TypeVar) -> Any:
+    default = getattr(typevar, "__default__", _MISSING_TYPEVAR_DEFAULT)
+    if default is _MISSING_TYPEVAR_DEFAULT:
+        return _MISSING_TYPEVAR_DEFAULT
+    # Works with both typing.NoDefault and typing_extensions.NoDefault.
+    if type(default).__name__ == "NoDefaultType":
+        return _MISSING_TYPEVAR_DEFAULT
+    return default
+
+
 def _specificity_score(value: Any) -> int:
     if isinstance(value, TypeVar):
         return 0
@@ -1937,6 +1989,12 @@ def _is_type_argument_valid(*, typevar: TypeVar, argument: Any) -> bool:
 def _matches_type_constraint(*, argument: Any, constraint: Any) -> bool:
     if constraint is Any:
         return True
+    constraint_origin = get_origin(constraint)
+    if constraint_origin in (Union, UnionType):
+        return any(
+            _matches_type_constraint(argument=argument, constraint=union_member)
+            for union_member in get_args(constraint)
+        )
     argument_type = _origin_or_self(argument)
     constraint_type = _origin_or_self(constraint)
     if isinstance(argument_type, type) and isinstance(constraint_type, type):

@@ -9,7 +9,7 @@ from types import TracebackType
 from typing import Annotated, Any, Generic, TypeVar, cast
 
 import pytest
-from typing_extensions import Self
+from typing_extensions import Self, TypeVar as TypeVarExt
 
 from diwire import BaseScope, Lifetime, LockMode, Scope
 from diwire._internal import open_generics
@@ -284,6 +284,52 @@ def test_matches_type_constraint_handles_any_and_issubclass_type_error(
 
     monkeypatch.setattr(builtins, "issubclass", lambda *_args: (_ for _ in ()).throw(TypeError()))
     assert open_generics._matches_type_constraint(argument=int, constraint=int) is False
+
+
+def test_matches_type_constraint_handles_union_with_parameterized_generic() -> None:
+    class _StateLike:
+        pass
+
+    constraint = typing.Mapping[str, Any] | _StateLike
+
+    assert (
+        open_generics._matches_type_constraint(argument=_StateLike, constraint=constraint) is True
+    )
+    assert (
+        open_generics._matches_type_constraint(argument=dict[str, Any], constraint=constraint)
+        is True
+    )
+    assert open_generics._matches_type_constraint(argument=int, constraint=constraint) is False
+
+
+def test_typevar_default_helpers_cover_missing_and_unresolved_defaults() -> None:
+    class _NoDefaultAttribute:
+        pass
+
+    class NoDefaultType:
+        pass
+
+    class _NoDefaultSentinel:
+        __default__ = NoDefaultType()
+
+    assert (
+        open_generics._typevar_default_or_missing(cast("Any", _NoDefaultAttribute()))
+        is open_generics._MISSING_TYPEVAR_DEFAULT
+    )
+    assert (
+        open_generics._typevar_default_or_missing(cast("Any", _NoDefaultSentinel()))
+        is open_generics._MISSING_TYPEVAR_DEFAULT
+    )
+
+    unresolved = TypeVar("unresolved")
+    defaulted = TypeVarExt("defaulted", default=unresolved)
+
+    class _DefaultedGeneric(Generic[defaulted]):
+        pass
+
+    assert open_generics._close_generic_dependency_with_typevar_defaults(_DefaultedGeneric) is (
+        _DefaultedGeneric
+    )
 
 
 def test_resolve_scope_transition_path_handles_all_error_and_success_paths() -> None:

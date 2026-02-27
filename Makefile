@@ -1,4 +1,4 @@
-.PHONY: format lint test docs examples-readme benchmark benchmark-diwire benchmark-comparison benchmark-json benchmark-report benchmark-report-all benchmark-json-resolve benchmark-report-resolve
+.PHONY: format lint test test-e2e-fastapi docs examples-readme benchmark benchmark-diwire benchmark-comparison benchmark-json benchmark-report benchmark-report-all benchmark-json-resolve benchmark-report-resolve
 
 format:
 	uv run ruff format .
@@ -11,6 +11,13 @@ lint:
 
 test:
 	uv run pytest tests/ --benchmark-skip --cov=src/diwire --cov-report=term-missing
+
+test-e2e-fastapi:
+	@set +e; \
+	docker compose -f tests/e2e/fastapi/docker-compose.yml up --build --abort-on-container-exit --exit-code-from tests; \
+	exit_code=$$?; \
+	docker compose -f tests/e2e/fastapi/docker-compose.yml down --volumes --remove-orphans; \
+	exit $$exit_code
 
 test-all-pythons:
 	uv run --python 3.10 pytest tests/ --benchmark-skip --cov=src/diwire --cov-report=term-missing

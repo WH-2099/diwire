@@ -110,6 +110,8 @@ class Container:
         "aresolve",
         "enter_scope",
     )
+    _OPEN_GENERIC_MATERIALIZATION_MAX_ITERATIONS: int = 10_000
+    _OPEN_GENERIC_MATERIALIZATION_STATE_TAIL_SIZE: int = 3
 
     def __init__(
         self,
@@ -2157,6 +2159,8 @@ class Container:
             )
             if self._providers_registrations.find_by_type(dependency_key):
                 continue
+            if self._open_generic_registry.has_match_for_dependency(dependency_key):
+                continue
             with suppress(DIWireError):
                 self._autoregister_dependency(
                     dependency=dependency_key,
@@ -2709,6 +2713,132 @@ class Container:
     def _callable_name(self, callable_obj: Callable[..., Any]) -> str:
         return getattr(callable_obj, "__qualname__", repr(callable_obj))
 
+    def _materialize_registered_open_generic_dependencies(self) -> None:
+        if not self._open_generic_registry.has_specs():
+            return
+
+        iteration_count = 0
+        seen_iteration_states: set[tuple[int, int, tuple[str, ...]]] = set()
+        materialized_registration_keys: list[Any] = []
+        materialized_registration_keys_seen: set[Any] = set()
+        materialized_closed_keys: list[Any] = []
+        materialized_closed_keys_seen: set[Any] = set()
+        while True:
+            iteration_count += 1
+            if iteration_count > self._OPEN_GENERIC_MATERIALIZATION_MAX_ITERATIONS:
+                self._rollback_open_generic_materialization(
+                    materialized_registration_keys=materialized_registration_keys,
+                    materialized_closed_keys=materialized_closed_keys,
+                )
+                self._raise_non_converging_open_generic_materialization_error(
+                    iteration_count=iteration_count,
+                    max_iterations=self._OPEN_GENERIC_MATERIALIZATION_MAX_ITERATIONS,
+                )
+
+            materialized_any = False
+            materialized_dependency_reprs: list[str] = []
+            registration_count_iteration_start = len(tuple(self._providers_registrations.values()))
+            for provider_spec in tuple(self._providers_registrations.values()):
+                for provider_dependency in provider_spec.dependencies:
+                    dependency_key = self._open_generic_materialization_dependency_key(
+                        provider_dependency.provides,
+                    )
+                    if dependency_key is None:
+                        continue
+                    if self._providers_registrations.find_by_type(dependency_key) is not None:
+                        continue
+                    open_match = self._open_generic_registry.find_best_match(dependency_key)
+                    if open_match is None:
+                        continue
+                    registration_count_before = len(tuple(self._providers_registrations.values()))
+                    self._materialize_closed_open_generic_spec(dependency_key, open_match)
+                    registration_count_after = len(tuple(self._providers_registrations.values()))
+                    if registration_count_after > registration_count_before:
+                        materialized_any = True
+                        materialized_dependency_reprs.append(repr(dependency_key))
+                        if dependency_key not in materialized_registration_keys_seen:
+                            materialized_registration_keys_seen.add(dependency_key)
+                            materialized_registration_keys.append(dependency_key)
+                        if (
+                            dependency_key in self._runtime_materialized_closed_keys
+                            and dependency_key not in materialized_closed_keys_seen
+                        ):
+                            materialized_closed_keys_seen.add(dependency_key)
+                            materialized_closed_keys.append(dependency_key)
+            if not materialized_any:
+                return
+
+            registration_count_iteration_end = len(tuple(self._providers_registrations.values()))
+            iteration_state = (
+                registration_count_iteration_end,
+                registration_count_iteration_end - registration_count_iteration_start,
+                tuple(
+                    materialized_dependency_reprs[
+                        -self._OPEN_GENERIC_MATERIALIZATION_STATE_TAIL_SIZE :
+                    ]
+                ),
+            )
+            if iteration_state in seen_iteration_states:
+                self._rollback_open_generic_materialization(
+                    materialized_registration_keys=materialized_registration_keys,
+                    materialized_closed_keys=materialized_closed_keys,
+                )
+                self._raise_non_converging_open_generic_materialization_error(
+                    iteration_count=iteration_count,
+                    max_iterations=self._OPEN_GENERIC_MATERIALIZATION_MAX_ITERATIONS,
+                    repeated_state=iteration_state,
+                )
+            seen_iteration_states.add(iteration_state)
+
+    def _rollback_open_generic_materialization(
+        self,
+        *,
+        materialized_registration_keys: list[Any],
+        materialized_closed_keys: list[Any],
+    ) -> None:
+        if not materialized_registration_keys and not materialized_closed_keys:
+            return
+
+        if materialized_registration_keys:
+            materialized_registration_keys_set = set(materialized_registration_keys)
+            providers_registrations = ProvidersRegistrations()
+            for spec in self._providers_registrations.values():
+                if spec.provides in materialized_registration_keys_set:
+                    continue
+                providers_registrations.add(spec)
+            self._providers_registrations = providers_registrations
+
+        for materialized_closed_key in materialized_closed_keys:
+            self._runtime_materialized_closed_keys.discard(materialized_closed_key)
+        self._invalidate_compilation()
+
+    def _raise_non_converging_open_generic_materialization_error(
+        self,
+        *,
+        iteration_count: int,
+        max_iterations: int,
+        repeated_state: tuple[int, int, tuple[str, ...]] | None = None,
+    ) -> None:
+        msg = (
+            "Open generic materialization did not converge while compiling container registrations. "
+            f"iterations={iteration_count}, max_iterations={max_iterations}, "
+            f"repeated_iteration_state={repeated_state!r}. "
+            "Debug context: _open_generic_materialization_dependency_key, "
+            "_materialize_closed_open_generic_spec, _providers_registrations, "
+            "_open_generic_registry."
+        )
+        raise DIWireInvalidRegistrationError(msg)
+
+    def _open_generic_materialization_dependency_key(self, dependency: Any) -> Any | None:
+        dependency_key = dependency
+        if is_maybe_annotation(dependency_key):
+            dependency_key = strip_maybe_annotation(dependency_key)
+        if is_provider_annotation(dependency_key):
+            dependency_key = strip_provider_annotation(dependency_key)
+        if is_all_annotation(dependency_key):
+            return None
+        return strip_non_component_annotation(dependency_key)
+
     # endregion Registration Methods
 
     # region Compilation
@@ -2738,6 +2868,7 @@ class Container:
         """
         with self._graph_state_lock:
             if self._root_resolver is None:
+                self._materialize_registered_open_generic_dependencies()
                 root_resolver = self._resolvers_manager.build_root_resolver(
                     root_scope=self._root_scope,
                     registrations=self._providers_registrations,
