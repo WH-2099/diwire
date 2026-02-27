@@ -6,13 +6,18 @@ import pytest
 
 from diwire import Container, Injected, Lifetime, Scope, resolver_context
 from diwire.exceptions import DIWireIntegrationError
-from diwire.integrations.typer import add_typer_context
 
 if TYPE_CHECKING:
     import typer
     from typer.testing import CliRunner
 
 typer = pytest.importorskip("typer")
+
+
+def _add_typer_context(container: Container) -> None:
+    from diwire.integrations.typer import add_typer_context
+
+    add_typer_context(container)
 
 
 class _ContextInfoService:
@@ -28,7 +33,7 @@ class _ContextInfoService:
 @pytest.fixture()
 def app() -> typer.Typer:
     container = Container()
-    add_typer_context(container)
+    _add_typer_context(container)
     container.add(
         _ContextInfoService,
         scope=Scope.REQUEST,
@@ -81,7 +86,7 @@ def test_context_resolve_in_service_for_command(runner: CliRunner, app: typer.Ty
 
 def test_context_resolution_raises_when_not_invoked_by_typer() -> None:
     container = Container()
-    add_typer_context(container)
+    _add_typer_context(container)
 
     with pytest.raises(DIWireIntegrationError, match="Typer context not available"):
         container.resolve(typer.Context)
