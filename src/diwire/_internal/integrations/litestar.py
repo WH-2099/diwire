@@ -12,7 +12,6 @@ from litestar.connection.base import (
 )
 from litestar.datastructures.state import State
 from litestar.enums import ScopeType
-from litestar.middleware import ASGIMiddleware
 from litestar.types import ASGIApp
 from litestar.types.asgi_types import HTTPScope, Receive, Scope, Send, WebSocketScope
 
@@ -68,37 +67,36 @@ def get_websocket(
     return cast("WebSocket[UserT, AuthT, StateT]", connection)
 
 
-class RequestContextMiddleware(ASGIMiddleware):
-    scopes = (ScopeType.HTTP, ScopeType.WEBSOCKET)
+class RequestContextMiddleware:
+    def __call__(self, app: ASGIApp) -> ASGIApp:
+        async def middleware(
+            scope: Scope,
+            receive: Receive,
+            send: Send,
+        ) -> None:
+            scope_type = scope["type"]
 
-    async def handle(
-        self,
-        scope: Scope,
-        receive: Receive,
-        send: Send,
-        next_app: ASGIApp,
-    ) -> None:
-        scope_type = scope["type"]
+            if scope_type == ScopeType.HTTP:
+                connection: ASGIConnection[Any, Any, Any, State] = Request(
+                    cast("HTTPScope", scope),
+                    receive=receive,
+                    send=send,
+                )
+            else:
+                connection = WebSocket(
+                    cast("WebSocketScope", scope),
+                    receive=receive,
+                    send=send,
+                )
 
-        if scope_type == ScopeType.HTTP:
-            connection: ASGIConnection[Any, Any, Any, State] = Request(
-                cast("HTTPScope", scope),
-                receive=receive,
-                send=send,
-            )
-        else:
-            connection = WebSocket(
-                cast("WebSocketScope", scope),
-                receive=receive,
-                send=send,
-            )
+            token = _connection_context.set(connection)
 
-        token = _connection_context.set(connection)
+            try:
+                await app(scope, receive, send)
+            finally:
+                _connection_context.reset(token)
 
-        try:
-            await next_app(scope, receive, send)
-        finally:
-            _connection_context.reset(token)
+        return middleware
 
 
 def add_request_context(container: Container) -> None:
