@@ -121,8 +121,8 @@ Run it locally
 
 .. code-block:: bash
 
-   pip install diwire fastapi uvicorn
-   uvicorn main:app --reload
+   uv add diwire fastapi uvicorn
+   uv run uvicorn main:app --reload
 
 Common gotchas
 --------------

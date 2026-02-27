@@ -12,108 +12,20 @@ diwire is a dependency injection container for Python 3.10+ that builds your obj
 scopes + deterministic cleanup, async resolution, open generics, fast steady-state resolution via compiled
 resolvers, and free-threaded Python (no-GIL) — all with zero runtime dependencies.
 
+## Frameworks & integrations
+
+- Web: [FastAPI](https://docs.diwire.dev/howto/web/fastapi.html), [Litestar](https://docs.diwire.dev/howto/web/litestar.html),
+  [aiohttp](https://docs.diwire.dev/howto/web/aiohttp.html), [Starlette](https://docs.diwire.dev/howto/web/starlette.html),
+  [Flask](https://docs.diwire.dev/howto/web/flask.html), [Django](https://docs.diwire.dev/howto/web/django.html)
+- Tasks: [Celery](https://docs.diwire.dev/howto/web/celery.html)
+- Testing: [pytest plugin (Injected parameters)](https://docs.diwire.dev/howto/testing/pytest.html)
+- Config: [pydantic-settings](https://docs.diwire.dev/howto/examples/pydantic-settings.html)
+- Overview: [Integrations](https://docs.diwire.dev/core/integrations.html)
+
 ## Installation
 
 ```bash
 uv add diwire
-```
-
-```bash
-pip install diwire
-```
-
-## FastAPI quick start (request scope + resolver_context)
-
-FastAPI already has its own dependency system, but diwire is useful when you want:
-
-- a single typed object graph shared across your app
-- request scopes with deterministic cleanup (generator/async-generator providers)
-- plain constructor injection for domain/services (not `Depends` everywhere)
-
-This example shows:
-
-- one app-level `Container()`
-- a per-request `Scope.REQUEST`
-- a small nested graph `UserService -> UserRepository -> DbSession`
-- injecting the active `Request` into a service (middleware-powered)
-
-```python
-from __future__ import annotations
-
-from collections.abc import Generator
-from dataclasses import dataclass, field
-
-from fastapi import FastAPI
-from starlette.requests import Request
-
-from diwire import Container, Injected, Lifetime, Scope, resolver_context
-from diwire.integrations.fastapi import RequestContextMiddleware, add_request_context
-
-
-@dataclass(slots=True)
-class DbSession:
-    closed: bool = field(default=False, init=False)
-
-    def close(self) -> None:
-        self.closed = True
-
-
-def provide_db_session() -> Generator[DbSession, None, None]:
-    session = DbSession()
-    try:
-        yield session
-    finally:
-        session.close()
-
-
-class UserRepository:
-    def __init__(self, session: DbSession) -> None:
-        self._session = session
-
-    def get_name(self, user_id: int) -> str:
-        _ = self._session
-        return f"user-{user_id}"
-
-
-class UserService:
-    def __init__(self, repo: UserRepository, request: Request) -> None:
-        self._repo = repo
-        self._request = request
-
-    def get_user(self, user_id: int) -> dict[str, int | str]:
-        return {
-            "id": user_id,
-            "name": self._repo.get_name(user_id),
-            "path": self._request.url.path,
-        }
-
-
-app = FastAPI()
-app.add_middleware(RequestContextMiddleware)
-
-container = Container()
-add_request_context(container)
-
-container.add_generator(provide_db_session, provides=DbSession, scope=Scope.REQUEST, lifetime=Lifetime.SCOPED)
-container.add(UserRepository, scope=Scope.REQUEST, lifetime=Lifetime.SCOPED)
-container.add(UserService, scope=Scope.REQUEST, lifetime=Lifetime.SCOPED)
-container.compile()  # optional, but recommended for stable hot-path performance
-
-
-@app.get("/users/{user_id}")
-@resolver_context.inject(scope=Scope.REQUEST)
-def get_user(user_id: int, service: Injected[UserService]) -> dict[str, int | str]:
-    return service.get_user(user_id)
-```
-
-Decorator order matters: apply `@resolver_context.inject(...)` *below* the FastAPI decorator so FastAPI sees the
-injected wrapper signature (`Injected[...]` parameters are removed from the public signature).
-
-Run it:
-
-```bash
-pip install diwire fastapi uvicorn
-uvicorn main:app --reload
 ```
 
 ## Why diwire
@@ -123,7 +35,7 @@ uvicorn main:app --reload
 - **Async resolution**: ``aresolve()`` mirrors ``resolve()`` and async providers are first-class. ([Async](https://docs.diwire.dev/core/async.html))
 - **Open generics**: register once, resolve for many type parameters. ([Open generics](https://docs.diwire.dev/core/open-generics.html))
 - **Function injection**: ``Injected[T]`` for ergonomic handlers. ([Function injection](https://docs.diwire.dev/core/function-injection.html))
-- **Framework/task support**: works with FastAPI, aiohttp, Flask, Django, and Celery patterns. ([Integrations](https://docs.diwire.dev/core/integrations.html))
+- **Framework/task support**: request/job scope patterns for FastAPI, Litestar, aiohttp, Starlette, Flask, Django, and Celery. ([Integrations](https://docs.diwire.dev/core/integrations.html))
 - **Named components + collect-all**: ``Component("name")`` and ``All[T]``. ([Components](https://docs.diwire.dev/core/components.html))
 - **Concurrency + free-threaded builds**: configurable locking via ``LockMode``. ([Concurrency](https://docs.diwire.dev/howto/advanced/concurrency.html))
 
@@ -375,6 +287,8 @@ diwire targets a stable, small public API.
 ## Docs
 
 - [Tutorial (runnable examples)](https://docs.diwire.dev/howto/examples/)
+- [Web frameworks](https://docs.diwire.dev/howto/web/)
+- [FastAPI quick start](https://docs.diwire.dev/quickstart-fastapi.html)
 - [Examples (repo)](https://github.com/maksimzayats/diwire/blob/main/examples/README.md)
 - [Core concepts](https://docs.diwire.dev/core/)
 - [API reference](https://docs.diwire.dev/reference/)
