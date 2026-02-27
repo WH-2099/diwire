@@ -1,5 +1,6 @@
 .. meta::
-   :description: Integrate diwire with web frameworks: official integrations for FastAPI, aiohttp, Flask, and Django, plus Celery task injection patterns and guidance for Starlette.
+   :description: Integrate diwire with web frameworks: FastAPI, Litestar, aiohttp, and patterns for Starlette, Flask, Django, and more.
+   :description: Integrate diwire with web frameworks: official integrations for FastAPI, Litestar, aiohttp, Flask, and Django, plus Celery task injection patterns and guidance for Starlette.
 
 Web frameworks
 ==============
@@ -17,6 +18,7 @@ The common pattern is:
    :maxdepth: 1
 
    fastapi
+   litestar
    aiohttp
    celery
    starlette
