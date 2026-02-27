@@ -7,6 +7,12 @@ Why diwire
 
 diwire is built for teams that want dependency injection to feel like *Python with type hints*, not like a framework.
 
+If your project is small, manual wiring might be the simplest choice. diwire becomes valuable when you have:
+
+- multiple layers (web handlers → services → repositories)
+- resources with lifetimes (DB sessions, HTTP clients, transactions)
+- the need for fast, deterministic tests (swap dependencies cleanly)
+
 The goals
 ---------
 
@@ -16,6 +22,14 @@ The goals
 - **Async support**: ``aresolve()`` mirrors ``resolve()`` and async providers are first-class.
 - **Zero runtime dependencies**: easy to adopt in any environment.
 - **Fast steady-state**: compiled resolvers reduce overhead on hot paths.
+
+What makes diwire different
+---------------------------
+
+- **Type-driven by default**: constructor signatures are the "wiring language".
+- **Scopes are first-class**: request/job scopes are explicit and come with deterministic cleanup.
+- **Performance is a feature**: compilation is built-in; benchmarks and methodology are published.
+- **Opt-in strict mode**: when you need full control, you can disable autoregistration and fail fast on missing keys.
 
 Stability
 ---------
@@ -54,6 +68,13 @@ When you need explicit control, you still have it:
 - lifetimes (``TRANSIENT``, ``SCOPED``) and scope transitions (root-scoped ``SCOPED`` behaves like a singleton)
 - named registrations via ``Component("name")``
 - open generics
+
+Where to start
+--------------
+
+- If you use FastAPI: :doc:`quickstart-fastapi`
+- If you want a DI primer first: :doc:`dependency-injection`
+- If you want runnable scripts: :doc:`howto/examples/index`
 
 Benchmarks
 ----------

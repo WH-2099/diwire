@@ -8,6 +8,7 @@ This section is a cookbook: pick the scenario closest to your app and copy the p
 
 If you're new to diwire, start with the :doc:`examples/index` tutorial first and come back here when you need a
 specific integration or pattern. When you want the deeper mental model, see :doc:`../core/index`.
+For a suggested reading order by experience level, see :doc:`../learning-paths`.
 
 .. toctree::
    :maxdepth: 2
