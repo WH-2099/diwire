@@ -3,7 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any, cast
 
-from mypy.nodes import ARG_NAMED, ARG_NAMED_OPT, ARG_OPT, ARG_POS
+from mypy.nodes import ARG_NAMED, ARG_NAMED_OPT, ARG_OPT, ARG_POS, ARG_STAR2
 from mypy.types import AnyType, TypeOfAny
 
 from diwire._internal.integrations import mypy_plugin
@@ -134,6 +134,31 @@ def test_build_precise_injected_callable_type_keeps_existing_resolver_kwarg(
         ["ResolverProtocol"],
         [ARG_NAMED_OPT],
         ["diwire_resolver"],
+    )
+
+
+def test_build_precise_injected_callable_type_inserts_resolver_before_kwargs(
+    monkeypatch: Any,
+) -> None:
+    callable_type = _FakeCallableType(
+        arg_types=["required", "kwargs"],
+        arg_kinds=[ARG_POS, ARG_STAR2],
+        arg_names=["required", None],
+    )
+    monkeypatch.setattr(
+        mypy_plugin, "_unwrap_injected_parameter_type", lambda value: (value, False)
+    )
+    monkeypatch.setattr(mypy_plugin, "_resolver_protocol_type", lambda _ctx: "ResolverProtocol")
+
+    transformed = mypy_plugin._build_precise_injected_callable_type(
+        ctx=cast("Any", SimpleNamespace()),
+        callable_type=cast("Any", callable_type),
+    )
+
+    assert transformed == (
+        ["required", "ResolverProtocol", "kwargs"],
+        [ARG_POS, ARG_NAMED_OPT, ARG_STAR2],
+        ["required", "diwire_resolver", None],
     )
 
 

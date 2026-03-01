@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from mypy.nodes import ARG_NAMED, ARG_NAMED_OPT, ARG_OPT, ARG_POS, ArgKind
+from mypy.nodes import ARG_NAMED, ARG_NAMED_OPT, ARG_OPT, ARG_POS, ARG_STAR2, ArgKind
 from mypy.plugin import MethodContext, Plugin
 from mypy.subtypes import is_same_type
 from mypy.types import AnyType, CallableType, Type, TypeOfAny, UnionType, get_proper_type
@@ -72,9 +72,16 @@ def _build_precise_injected_callable_type(
         arg_names.append(arg_name)
 
     if _INJECT_RESOLVER_KWARG not in arg_names:
-        arg_types.append(_resolver_protocol_type(ctx))
-        arg_kinds.append(ARG_NAMED_OPT)
-        arg_names.append(_INJECT_RESOLVER_KWARG)
+        resolver_type = _resolver_protocol_type(ctx)
+        insert_at = len(arg_kinds)
+        for index, arg_kind in enumerate(arg_kinds):
+            if arg_kind == ARG_STAR2:
+                insert_at = index
+                break
+
+        arg_types.insert(insert_at, resolver_type)
+        arg_kinds.insert(insert_at, ARG_NAMED_OPT)
+        arg_names.insert(insert_at, _INJECT_RESOLVER_KWARG)
 
     return callable_type.copy_modified(
         arg_types=arg_types,
