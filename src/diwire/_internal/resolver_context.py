@@ -19,13 +19,32 @@ from diwire._internal.scope import BaseScope
 from diwire.exceptions import DIWireInvalidRegistrationError, DIWireResolverNotSetError
 
 if TYPE_CHECKING:
+    from typing import Protocol
+
     from typing_extensions import Self
 
     from diwire._internal.container import Container
 
 
 T = TypeVar("T")
-InjectableF = TypeVar("InjectableF", bound=Callable[..., Any])
+InjectReturnT_co = TypeVar("InjectReturnT_co", covariant=True)
+
+if TYPE_CHECKING:
+
+    class _InjectedCallable(Protocol[InjectReturnT_co]):
+        def __call__(
+            self,
+            *args: Any,
+            diwire_resolver: ResolverProtocol = ...,
+            **kwargs: Any,
+        ) -> InjectReturnT_co: ...
+
+    class _InjectDecorator(Protocol):
+        def __call__(
+            self,
+            func: Callable[..., InjectReturnT_co],
+            /,
+        ) -> _InjectedCallable[InjectReturnT_co]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -290,7 +309,10 @@ class ResolverContext:
         return self._require_context_or_fallback_resolver().enter_scope(scope)
 
     @overload
-    def inject(self, func: InjectableF) -> InjectableF: ...
+    def inject(
+        self,
+        func: Callable[..., InjectReturnT_co],
+    ) -> _InjectedCallable[InjectReturnT_co]: ...
 
     @overload
     def inject(
@@ -302,18 +324,18 @@ class ResolverContext:
             DependencyRegistrationPolicy | Literal["from_container"]
         ) = "from_container",
         auto_open_scope: bool = True,
-    ) -> Callable[[InjectableF], InjectableF]: ...
+    ) -> _InjectDecorator: ...
 
     def inject(
         self,
-        func: InjectableF | Literal["from_decorator"] = "from_decorator",
+        func: Callable[..., Any] | Literal["from_decorator"] = "from_decorator",
         *,
         scope: BaseScope | Literal["infer"] = "infer",
         dependency_registration_policy: (
             DependencyRegistrationPolicy | Literal["from_container"]
         ) = "from_container",
         auto_open_scope: bool = True,
-    ) -> InjectableF | Callable[[InjectableF], InjectableF]:
+    ) -> _InjectedCallable[Any] | _InjectDecorator:
         """Wrap callables so ``Injected[...]`` parameters resolve at invocation.
 
         Resolution precedence at call time is explicit ``diwire_resolver``,
@@ -352,7 +374,9 @@ class ResolverContext:
             )
         )
 
-        def decorator(callable_obj: InjectableF) -> InjectableF:
+        def decorator(
+            callable_obj: Callable[..., InjectReturnT_co],
+        ) -> _InjectedCallable[InjectReturnT_co]:
             self._validate_injected_callable_signature(callable_obj)
             inspected_callable = self._injected_callable_inspector.inspect_callable(callable_obj)
             cache: dict[Container, Callable[..., Any]] = {}
@@ -380,11 +404,11 @@ class ResolverContext:
             )
             wrapped_callable.__signature__ = inspected_callable.public_signature  # type: ignore[attr-defined]
             wrapped_callable.__dict__[INJECT_WRAPPER_MARKER] = True
-            return cast("InjectableF", wrapped_callable)
+            return cast("_InjectedCallable[InjectReturnT_co]", wrapped_callable)
 
         func_value = cast("Any", func)
         if func_value == "from_decorator":
-            return decorator
+            return cast("_InjectDecorator", decorator)
         if not callable(func_value):
             msg = "inject() parameter 'func' must be callable or 'from_decorator'."
             raise DIWireInvalidRegistrationError(msg)
@@ -510,7 +534,7 @@ class ResolverContext:
     def _wrap_injected_callable(
         self,
         *,
-        callable_obj: InjectableF,
+        callable_obj: Callable[..., Any],
         invocation: Callable[..., Any],
     ) -> Callable[..., Any]:
         if inspect.iscoroutinefunction(callable_obj):
