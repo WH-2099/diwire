@@ -12,6 +12,7 @@ import pytest
 
 import diwire
 import diwire.exceptions as diwire_exceptions
+import diwire.integrations.mypy_plugin as diwire_mypy_plugin
 import diwire.integrations.pytest_plugin as diwire_pytest_plugin
 
 _EXPECTED_SNAPSHOT_PATH = Path(__file__).with_name("public_api_signatures_expected.txt")
@@ -101,10 +102,15 @@ def _collect_pytest_plugin_snapshot() -> list[str]:
     return _collect_export_snapshot(diwire_pytest_plugin, list(diwire_pytest_plugin.__all__))
 
 
+def _collect_mypy_plugin_snapshot() -> list[str]:
+    return _collect_export_snapshot(diwire_mypy_plugin, list(diwire_mypy_plugin.__all__))
+
+
 def _build_public_api_snapshot() -> str:
     snapshot_sections = [
         ("[diwire]", _collect_module_exports_snapshot()),
         ("[diwire.exceptions]", _collect_exceptions_snapshot()),
+        ("[diwire.integrations.mypy_plugin]", _collect_mypy_plugin_snapshot()),
         ("[diwire.integrations.pytest_plugin]", _collect_pytest_plugin_snapshot()),
     ]
 

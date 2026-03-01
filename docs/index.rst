@@ -84,7 +84,8 @@ Why diwire
 - **Compiled resolver**: build fast resolution paths once with ``compile()``.
 - **Scopes + cleanup**: per-request caching and deterministic cleanup via generators/async-generators.
 - **Open generics**: register ``Box[T]`` once and resolve ``Box[User]`` safely.
-- **Function injection**: ``Injected[T]`` keeps signatures explicit and typed.
+- **Function injection**: ``Injected[T]`` keeps runtime signatures explicit; enable the mypy plugin for
+  precise static signatures.
 - **Async support**: ``aresolve()`` mirrors ``resolve()`` and async providers are first-class.
 - **Framework integration**: request-scoped injection patterns for FastAPI, Litestar, aiohttp, Flask, and Django.
 

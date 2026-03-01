@@ -140,7 +140,7 @@ Next steps
 
 - :doc:`howto/web/fastapi` - full FastAPI integration guide (HTTP + WebSocket notes, testing)
 - :doc:`core/scopes` - how scopes and cleanup work
-- :doc:`core/function-injection` - what ``Injected[T]`` does (and why it stays typed)
+- :doc:`core/function-injection` - what ``Injected[T]`` does (including mypy plugin setup for precise typing)
 
 .. note::
 

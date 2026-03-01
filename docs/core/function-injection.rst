@@ -56,6 +56,26 @@ One exception is ``Container(..., use_resolver_context=False)`` mode: unbound
 ``@resolver_context.inject`` calls must pass ``diwire_resolver=...`` explicitly
 (or run under another bound resolver context).
 
+Static typing
+-------------
+
+Static type behavior depends on checker setup:
+
+- fallback (non-mypy checkers, or mypy without plugin): permissive callable arguments with preserved return type
+- mypy with plugin: precise callable signatures where injected parameters become optional, non-injected parameters stay strict, and optional ``diwire_resolver: ResolverProtocol`` is accepted
+
+The plugin supports both decorator styles:
+
+- ``@resolver_context.inject``
+- ``@resolver_context.inject(...)``
+
+Enable the plugin in ``pyproject.toml``:
+
+.. code-block:: toml
+
+   [tool.mypy]
+   plugins = ["diwire.integrations.mypy_plugin"]
+
 ContextVar pattern for request values
 -------------------------------------
 

@@ -26,7 +26,7 @@ diwire.Provider | class | ()
 diwire.ResolverContext | class | () -> 'None'
 diwire.ResolverContext.aresolve | (self, dependency: 'Any') -> 'Any'
 diwire.ResolverContext.enter_scope | (self, scope: 'BaseScope | None' = None) -> 'ResolverProtocol'
-diwire.ResolverContext.inject | (self, func: "InjectableF | Literal['from_decorator']" = 'from_decorator', *, scope: "BaseScope | Literal['infer']" = 'infer', dependency_registration_policy: "DependencyRegistrationPolicy | Literal['from_container']" = 'from_container', auto_open_scope: 'bool' = True) -> 'InjectableF | Callable[[InjectableF], InjectableF]'
+diwire.ResolverContext.inject | (self, func: "Callable[..., Any] | Literal['from_decorator']" = 'from_decorator', *, scope: "BaseScope | Literal['infer']" = 'infer', dependency_registration_policy: "DependencyRegistrationPolicy | Literal['from_container']" = 'from_container', auto_open_scope: 'bool' = True) -> '_InjectedCallable[Any] | _InjectDecorator'
 diwire.ResolverContext.resolve | (self, dependency: 'Any') -> 'Any'
 diwire.ResolverContext.set_fallback_container | (self, container: 'Container') -> 'None'
 diwire.ResolverProtocol | class | (*args, **kwargs)
@@ -49,6 +49,9 @@ diwire.exceptions.DIWireInvalidRegistrationError | class | <no-signature>
 diwire.exceptions.DIWireProviderDependencyInferenceError | class | <no-signature>
 diwire.exceptions.DIWireResolverNotSetError | class | <no-signature>
 diwire.exceptions.DIWireScopeMismatchError | class | <no-signature>
+
+[diwire.integrations.mypy_plugin]
+diwire.integrations.mypy_plugin.plugin | callable | (version: 'str') -> 'type[Plugin]'
 
 [diwire.integrations.pytest_plugin]
 diwire.integrations.pytest_plugin.diwire_container | callable | () -> 'Container'

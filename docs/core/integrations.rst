@@ -38,6 +38,24 @@ functions from a root test container.
 
 Runnable example: :doc:`/howto/examples/pytest-plugin`.
 
+mypy plugin
+-----------
+
+diwire also ships with an optional mypy plugin for precise
+``@resolver_context.inject`` typing.
+
+- preserves strict typing for non-injected parameters
+- makes ``Injected[T]`` parameters optional in decorated call signatures
+- adds optional ``diwire_resolver: ResolverProtocol`` to decorated call signatures
+- supports both ``@resolver_context.inject`` and ``@resolver_context.inject(...)``
+
+Enable it in ``pyproject.toml``:
+
+.. code-block:: toml
+
+   [tool.mypy]
+   plugins = ["diwire.integrations.mypy_plugin"]
+
 Web frameworks (FastAPI + Litestar + aiohttp + Flask + Django)
 ---------------------------------------------------------------
 

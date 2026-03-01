@@ -209,6 +209,15 @@ def handler(service: Injected[Service]) -> str:
 print(handler())  # => ok
 ```
 
+Static typing note: without a checker plugin, injected wrappers keep return types but accept permissive
+arguments. For precise mypy signatures (optional injected params, strict non-injected params, optional
+`diwire_resolver` kwarg), enable:
+
+```toml
+[tool.mypy]
+plugins = ["diwire.integrations.mypy_plugin"]
+```
+
 ## Named components
 
 Use `Annotated[T, Component("name")]` when you need multiple registrations for the same base type.
