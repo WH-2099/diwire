@@ -9,7 +9,7 @@ pytest.importorskip("django")
 pytest.importorskip("dmr")
 pytest.importorskip("pydantic")
 
-from django.http import HttpRequest, HttpResponseBase
+from django.http import HttpRequest, HttpResponse
 from django.test import override_settings
 from django.urls import path
 from dmr import Controller
@@ -24,7 +24,7 @@ from tests._django_setup import ensure_django_setup
 ensure_django_setup()
 
 
-def _json_body(response: HttpResponseBase) -> dict[str, str]:
+def _json_body(response: HttpResponse) -> dict[str, str]:
     content = cast("bytes", response.content)
     return cast("dict[str, str]", loads(content))
 
