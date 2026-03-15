@@ -4,10 +4,10 @@ from json import loads
 from typing import cast
 
 import pytest
-from pydantic import BaseModel
 
 pytest.importorskip("django")
 pytest.importorskip("dmr")
+pytest.importorskip("pydantic")
 
 from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
@@ -15,6 +15,7 @@ from django.urls import path
 from dmr import Controller
 from dmr.plugins.pydantic import PydanticSerializer
 from dmr.test import DMRClient
+from pydantic import BaseModel
 
 from diwire import Container, Injected, Lifetime, Scope, resolver_context
 from diwire.integrations.django import add_request_context
