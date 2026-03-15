@@ -22,6 +22,7 @@ from tests._django_setup import ensure_django_setup
 
 ensure_django_setup()
 
+
 def _json_body(response: HttpResponseBase) -> dict[str, str]:
     content = cast("bytes", response.content)
     return cast("dict[str, str]", loads(content))
@@ -29,6 +30,7 @@ def _json_body(response: HttpResponseBase) -> dict[str, str]:
 
 class _PathResponse(BaseModel):
     path: str
+
 
 @dataclass
 class _RequestPathService:
