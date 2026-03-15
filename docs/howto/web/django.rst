@@ -8,6 +8,9 @@ Django
 The Django integration provides request-scoped dependency resolution for views using the same
 ``Injected[T]`` pattern as other diwire web integrations.
 
+If your Django views are implemented with ``django-modern-rest`` controllers, see
+:doc:`django-modern-rest`.
+
 Minimal setup
 -------------
 

@@ -1,0 +1,14 @@
+from django.test import override_settings
+
+from dmr.test import DMRClient
+
+with override_settings(
+    ROOT_URLCONF=__name__,
+    MIDDLEWARE=["diwire.integrations.django.RequestContextMiddleware"],
+):
+    response = DMRClient().get("/api/path/")
+    assert response.status_code == 200
+    assert response.json() == {
+        "direct_path": "/api/path/",
+        "service_path": "/api/path/",
+    }

@@ -24,3 +24,4 @@ The common pattern is:
    starlette
    flask
    django
+   django-modern-rest

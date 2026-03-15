@@ -617,6 +617,7 @@ dev = [
     { name = "dishka" },
     { name = "django", version = "5.2.11", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "django", version = "6.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' and python_full_version < '3.15'" },
+    { name = "django-modern-rest", marker = "python_full_version >= '3.11' and python_full_version < '3.15'" },
     { name = "fastapi", marker = "python_full_version < '3.15'" },
     { name = "flask" },
     { name = "httpx" },
@@ -660,6 +661,7 @@ dev = [
     { name = "celery", extras = ["redis"], marker = "python_full_version < '3.15'", specifier = ">=5.5.3" },
     { name = "dishka", specifier = ">=1.7.2" },
     { name = "django", marker = "python_full_version < '3.15'", specifier = ">=5.2.0" },
+    { name = "django-modern-rest", marker = "python_full_version >= '3.11' and python_full_version < '3.15'", specifier = ">=0.0.0" },
     { name = "fastapi", marker = "python_full_version < '3.15'", specifier = ">=0.128.0" },
     { name = "flask", specifier = ">=3.1.2" },
     { name = "httpx", specifier = ">=0.27.0" },
@@ -725,6 +727,20 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/26/3e/a1c4207c5dea4697b7a3387e26584919ba987d8f9320f59dc0b5c557a4eb/django-6.0.2.tar.gz", hash = "sha256:3046a53b0e40d4b676c3b774c73411d7184ae2745fe8ce5e45c0f33d3ddb71a7", size = 10886874, upload-time = "2026-02-03T13:50:31.596Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/96/ba/a6e2992bc5b8c688249c00ea48cb1b7a9bc09839328c81dc603671460928/django-6.0.2-py3-none-any.whl", hash = "sha256:610dd3b13d15ec3f1e1d257caedd751db8033c5ad8ea0e2d1219a8acf446ecc6", size = 8339381, upload-time = "2026-02-03T13:50:15.501Z" },
+]
+
+[[package]]
+name = "django-modern-rest"
+version = "0.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "django", version = "5.2.11", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
+    { name = "django", version = "6.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "typing-extensions", marker = "python_full_version >= '3.11'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/8e/ea/6c5d0431d5ddab35045d0d8c6ea9d4f206b6612e7e4cebabc51f32701516/django_modern_rest-0.1.0.tar.gz", hash = "sha256:8b680753841c502925cc1dc0c334e8030291bd05935638b2c51b24590ad3045b", size = 726779, upload-time = "2026-03-13T08:33:55.642Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ee/ba/eb40c3f1b4e5316b2d5b75c4b032437046fe2abcd912816fcf8efa233d22/django_modern_rest-0.1.0-py3-none-any.whl", hash = "sha256:29833b65df15c5570b80f48fa9889f1a478cec5614085063ba68bccee60a70cf", size = 781267, upload-time = "2026-03-13T08:33:57.398Z" },
 ]
 
 [[package]]
