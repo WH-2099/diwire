@@ -29,7 +29,16 @@ _RESOLVER_CONTEXT_IMPORT_RE = re.compile(
 )
 
 _OPTIONAL_DOC_DEPS: frozenset[str] = frozenset(
-    {"aiohttp", "celery", "django", "fastapi", "flask", "litestar", "starlette"}
+    {
+        "aiohttp",
+        "celery",
+        "django",
+        "dmr",
+        "fastapi",
+        "flask",
+        "litestar",
+        "starlette",
+    }
 )
 
 

@@ -1,0 +1,64 @@
+import django
+
+from django.apps import apps
+from django.conf import settings
+from django.http import HttpRequest
+from django.urls import path
+from pydantic import BaseModel
+
+from dmr import Controller
+from dmr.plugins.pydantic import PydanticSerializer
+
+from diwire import Container, Injected, Lifetime, Scope, resolver_context
+from diwire.integrations.django import add_request_context
+
+if not settings.configured:
+    settings.configure(
+        ALLOWED_HOSTS=["*"],
+        INSTALLED_APPS=[],
+        SECRET_KEY="docs-example-secret",
+    )
+
+if not apps.ready:
+    django.setup()
+
+container = Container()
+add_request_context(container)
+
+
+class PathResponse(BaseModel):
+    direct_path: str
+    service_path: str
+
+
+class RequestPathService:
+    def __init__(self, request: HttpRequest) -> None:
+        self._request = request
+
+    def path(self) -> str:
+        return self._request.path
+
+
+container.add(
+    RequestPathService,
+    scope=Scope.REQUEST,
+    lifetime=Lifetime.SCOPED,
+)
+
+
+class PathController(Controller[PydanticSerializer]):
+    @resolver_context.inject(scope=Scope.REQUEST)
+    def get(
+        self,
+        request: Injected[HttpRequest],
+        service: Injected[RequestPathService],
+    ) -> PathResponse:
+        return PathResponse(
+            direct_path=request.path,
+            service_path=service.path(),
+        )
+
+
+urlpatterns = [
+    path("api/path/", PathController.as_view()),
+]
