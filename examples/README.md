@@ -3457,7 +3457,7 @@ from pathlib import Path
 
 def main() -> None:
     example_dir = Path(__file__).resolve().parent
-    completed = subprocess.run(  # noqa: S603
+    completed = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "test_demo.py"],
         cwd=example_dir,
         capture_output=True,

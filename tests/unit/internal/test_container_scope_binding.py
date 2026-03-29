@@ -5,6 +5,7 @@ from contextvars import ContextVar
 import pytest
 
 from diwire import Container, Lifetime, Scope
+from diwire._internal.scope import BaseScope, BaseScopes, Scopes
 from diwire.exceptions import DIWireScopeMismatchError
 
 
@@ -39,6 +40,53 @@ def test_container_resolve_uses_context_bound_scope_by_default() -> None:
 
     with container.enter_scope(Scope.REQUEST):
         assert isinstance(container.resolve(_RequestOnly), _RequestOnly)
+
+
+def test_plain_class_attributes_do_not_rebind_shared_scope_metadata() -> None:
+    class _ScopeHolder:
+        app_scope = Scope.APP
+        request_scope = Scope.REQUEST
+
+    assert _ScopeHolder.app_scope is Scope.APP
+    assert _ScopeHolder.request_scope is Scope.REQUEST
+    assert Scope.APP.owner is Scopes
+    assert Scope.REQUEST.owner is Scopes
+    assert Scope.APP.scope_name == "APP"
+    assert Scope.REQUEST.scope_name == "REQUEST"
+
+    container = Container()
+    container.add(
+        _RequestOnly,
+        provides=_RequestOnly,
+        scope=Scope.REQUEST,
+        lifetime=Lifetime.SCOPED,
+    )
+
+    with container.enter_scope(Scope.REQUEST):
+        assert isinstance(container.resolve(_RequestOnly), _RequestOnly)
+
+
+def test_scope_metadata_binding_is_idempotent_for_the_same_owner() -> None:
+    scope = BaseScope(99)
+
+    scope.__set_name__(Scopes, "CUSTOM")
+    scope.__set_name__(Scopes, "CUSTOM")
+
+    assert scope.owner is Scopes
+    assert scope.scope_name == "CUSTOM"
+
+
+def test_scope_metadata_binding_keeps_first_base_scopes_owner() -> None:
+    class _OtherScopes(BaseScopes):
+        pass
+
+    scope = BaseScope(100)
+
+    scope.__set_name__(Scopes, "CUSTOM")
+    scope.__set_name__(_OtherScopes, "OTHER")
+
+    assert scope.owner is Scopes
+    assert scope.scope_name == "CUSTOM"
 
 
 @pytest.mark.asyncio
