@@ -22,9 +22,20 @@ class BaseScope(int):
 
     def __set_name__(
         self,
-        owner: type[BaseScopes],
+        owner: type[object],
         name: str,
     ) -> None:
+        # ``BaseScope`` values are plain constants. Reusing ``Scope.REQUEST`` as a
+        # class attribute on arbitrary user classes should not rewrite the shared
+        # metadata used by resolver generation and scope traversal.
+        if not issubclass(owner, BaseScopes):
+            return
+
+        if getattr(self, "owner", None) is owner and getattr(self, "scope_name", None) == name:
+            return
+        if hasattr(self, "owner") or hasattr(self, "scope_name"):
+            return
+
         self.owner = owner
         self.scope_name = name
 
