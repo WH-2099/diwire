@@ -52,6 +52,20 @@ Run locally
    :language: python
    :class: diwire-example py-run
 
+Add factory class
+-----------------
+
+Run locally
+~~~~~~~~~~~
+
+.. code-block:: bash
+
+   uv run python examples/ex_02_registration_methods/09_add_factory_class.py
+
+.. literalinclude:: ../../../examples/ex_02_registration_methods/09_add_factory_class.py
+   :language: python
+   :class: diwire-example py-run
+
 Add generator cleanup
 ---------------------
 
@@ -77,6 +91,20 @@ Run locally
    uv run python examples/ex_02_registration_methods/05_add_context_manager_cleanup.py
 
 .. literalinclude:: ../../../examples/ex_02_registration_methods/05_add_context_manager_cleanup.py
+   :language: python
+   :class: diwire-example py-run
+
+Add cleanup classes
+-------------------
+
+Run locally
+~~~~~~~~~~~
+
+.. code-block:: bash
+
+   uv run python examples/ex_02_registration_methods/08_add_cleanup_classes.py
+
+.. literalinclude:: ../../../examples/ex_02_registration_methods/08_add_cleanup_classes.py
    :language: python
    :class: diwire-example py-run
 
