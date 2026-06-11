@@ -33,7 +33,20 @@ jobs:
         run: uv python install ${{ matrix.python-version }}
 
       - name: Install dependencies
+        if: matrix.python-version != '3.15t'
         run: uv sync --group dev --group docs
+
+      - name: Install dependencies without mypy on Python 3.15t
+        if: matrix.python-version == '3.15t'
+        run: |
+          # mypy 2.1.0 depends on ast-serialize 0.3.0, whose built wheel is
+          # rejected by uv for free-threaded Python 3.15. Keep the 3.15t
+          # runtime test coverage, but skip installing the incompatible type
+          # checker stack until upstream publishes compatible wheels.
+          uv sync --group dev --group docs \
+            --no-install-package mypy \
+            --no-install-package ast-serialize
+          echo "UV_NO_SYNC=1" >> "$GITHUB_ENV"
 
       - name: Remove Python 3.15-incompatible sphinxcontrib-jsmath namespace hook
         if: matrix.python-version == '3.15' || matrix.python-version == '3.15t'
@@ -66,6 +79,7 @@ jobs:
         run: uv run ruff check .
 
       - name: Type check with mypy
+        if: matrix.python-version != '3.15t'
         run: uv run mypy .
 
       - name: Run tests with coverage
