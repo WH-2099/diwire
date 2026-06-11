@@ -87,8 +87,17 @@ jobs:
         run: uv run pytest tests/ --benchmark-skip --cov=src/diwire --cov-report=xml --cov-report=term-missing
 
       - name: Run tests (no coverage on Python 3.15)
-        if: matrix.python-version == '3.15' || matrix.python-version == '3.15t'
+        if: matrix.python-version == '3.15'
         run: uv run pytest tests/ --benchmark-skip
+
+      - name: Run tests (no coverage on Python 3.15t)
+        if: matrix.python-version == '3.15t'
+        run: |
+          # mypy is intentionally not installed on 3.15t above, so skip only
+          # the mypy-plugin tests that import mypy directly.
+          uv run pytest tests/ --benchmark-skip \
+            --ignore=tests/unit/internal/test_integrations_mypy_plugin.py \
+            --ignore=tests/unit/internal/test_integrations_mypy_plugin_internal.py
 
       - name: Upload coverage to Codecov
         if: matrix.python-version == '3.14'
