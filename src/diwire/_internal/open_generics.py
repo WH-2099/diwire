@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import inspect
 import logging
 import threading
@@ -48,6 +49,9 @@ _MAYBE_UNHANDLED = object()
 _UNSET_CACHE = object()
 logger = logging.getLogger(__name__)
 _MISSING_TYPEVAR_DEFAULT = object()
+_LIVE_PROVIDER_CLEANUP_RESOLVER_IDS: contextvars.ContextVar[frozenset[int]] = (
+    contextvars.ContextVar("_OPEN_GENERIC_LIVE_PROVIDER_CLEANUP_RESOLVER_IDS", default=frozenset())
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -354,6 +358,14 @@ class _OpenGenericResolver:  # pragma: no cover
         "_cleanup_callbacks",
         "_cleanup_enabled",
         "_has_async_specs",
+        "_live_provider_closing",
+        "_live_provider_condition",
+        "_live_provider_container",
+        "_live_provider_epoch",
+        "_live_provider_graph_revision",
+        "_live_provider_inflight",
+        "_live_provider_lock",
+        "_live_provider_scope_cache",
         "_local_state_lock",
         "_managed_scopes",
         "_materialization_attempt_lock",
@@ -411,6 +423,10 @@ class _OpenGenericResolver:  # pragma: no cover
             getattr(base_resolver, "_cleanup_enabled", True),
         )
         self._owned_scope_wrappers: tuple[_OpenGenericResolver, ...] = ()
+        self._init_live_provider_state(
+            base_resolver=base_resolver,
+            root_wrapper=root_wrapper,
+        )
         if root_wrapper is None:
             self._managed_scopes = tuple(
                 sorted(
@@ -476,6 +492,37 @@ class _OpenGenericResolver:  # pragma: no cover
             materialize_closed_callback=materialize_closed_callback,
         )
 
+    def _init_live_provider_state(
+        self,
+        *,
+        base_resolver: ResolverProtocol,
+        root_wrapper: _OpenGenericResolver | None,
+    ) -> None:
+        self._live_provider_scope_cache: dict[tuple[int, int], Any] = {}
+        self._live_provider_lock = threading.RLock()
+        self._live_provider_condition = threading.Condition(self._live_provider_lock)
+        self._live_provider_closing = False
+        self._live_provider_inflight = 0
+        self._live_provider_epoch = _resolver_live_provider_epoch(resolver=base_resolver)
+        if root_wrapper is None:
+            base_runtime = getattr(type(base_resolver), "_runtime", None)
+            self._live_provider_container = getattr(
+                base_runtime,
+                "live_provider_container",
+                None,
+            )
+            self._live_provider_graph_revision = getattr(
+                base_runtime,
+                "live_provider_graph_revision",
+                None,
+            )
+            return
+
+        (
+            self._live_provider_container,
+            self._live_provider_graph_revision,
+        ) = root_wrapper.live_provider_metadata()
+
     def _init_runtime_resolver_state(
         self,
         *,
@@ -513,6 +560,9 @@ class _OpenGenericResolver:  # pragma: no cover
         set[Any],
     ]:
         return self._shared_child_state
+
+    def live_provider_metadata(self) -> tuple[Any | None, int | None]:
+        return self._live_provider_container, self._live_provider_graph_revision
 
     def _refresh_shared_child_state(self) -> None:
         self._shared_child_state = (
@@ -799,47 +849,53 @@ class _OpenGenericResolver:  # pragma: no cover
         exc_value: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        if not self._owned_scope_wrappers and not self._cleanup_callbacks:
-            self._base_resolver.__exit__(exc_type, exc_value, traceback)
-            return
+        self._begin_live_provider_close()
+        cleanup_token = _enter_live_provider_cleanup_context(resolver=self)
+        cleanup_error: BaseException | None = None
+        try:
+            try:
+                if not self._owned_scope_wrappers and not self._cleanup_callbacks:
+                    self._base_resolver.__exit__(exc_type, exc_value, traceback)
+                else:
+                    callbacks: list[tuple[int, Any]] = (
+                        self._cleanup_callbacks
+                        if self._resolver_cleanup_callbacks() is None
+                        else []
+                    )
 
-        callbacks: list[tuple[int, Any]] = (
-            self._cleanup_callbacks if self._resolver_cleanup_callbacks() is None else []
-        )
-
-        def _base_exit_callback(
-            callback_exc_type: type[BaseException] | None,
-            callback_exc_value: BaseException | None,
-            callback_traceback: TracebackType | None,
-        ) -> None:
-            self._base_resolver.__exit__(
-                callback_exc_type,
-                callback_exc_value,
-                callback_traceback,
-            )
-
-        if self._owned_scope_wrappers:
-            callbacks[:0] = [
-                (
-                    0,
-                    lambda callback_exc_type, callback_exc_value, callback_traceback, owned_scope_wrapper=owned_scope_wrapper: (
-                        owned_scope_wrapper.__exit__(
+                    def _base_exit_callback(
+                        callback_exc_type: type[BaseException] | None,
+                        callback_exc_value: BaseException | None,
+                        callback_traceback: TracebackType | None,
+                    ) -> None:
+                        self._base_resolver.__exit__(
                             callback_exc_type,
                             callback_exc_value,
                             callback_traceback,
                         )
-                    ),
-                )
-                for owned_scope_wrapper in self._owned_scope_wrappers
-            ]
 
-        callbacks.append((0, _base_exit_callback))
-        _execute_sync_cleanup_callbacks(
-            callbacks=callbacks,
-            exc_type=exc_type,
-            exc_value=exc_value,
-            traceback=traceback,
-        )
+                    callbacks.insert(0, (0, _base_exit_callback))
+                    _execute_sync_cleanup_callbacks(
+                        callbacks=callbacks,
+                        exc_type=exc_type,
+                        exc_value=exc_value,
+                        traceback=traceback,
+                    )
+            except BaseException as error:  # noqa: BLE001
+                cleanup_error = error
+            cleanup_error = self._close_owned_live_provider_rebounds_sync(
+                exc_type=exc_type,
+                exc_value=exc_value,
+                traceback=traceback,
+                cleanup_error=cleanup_error,
+            )
+            if cleanup_error is not None:
+                raise cleanup_error
+        finally:
+            try:
+                self._clear_live_provider_rebounds()
+            finally:
+                _leave_live_provider_cleanup_context(token=cleanup_token)
 
     def close(
         self,
@@ -861,47 +917,53 @@ class _OpenGenericResolver:  # pragma: no cover
         exc_value: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        if not self._owned_scope_wrappers and not self._cleanup_callbacks:
-            await self._base_resolver.__aexit__(exc_type, exc_value, traceback)
-            return
+        await self._begin_live_provider_aclose()
+        cleanup_token = _enter_live_provider_cleanup_context(resolver=self)
+        cleanup_error: BaseException | None = None
+        try:
+            try:
+                if not self._owned_scope_wrappers and not self._cleanup_callbacks:
+                    await self._base_resolver.__aexit__(exc_type, exc_value, traceback)
+                else:
+                    callbacks: list[tuple[int, Any]] = (
+                        self._cleanup_callbacks
+                        if self._resolver_cleanup_callbacks() is None
+                        else []
+                    )
 
-        callbacks: list[tuple[int, Any]] = (
-            self._cleanup_callbacks if self._resolver_cleanup_callbacks() is None else []
-        )
-
-        async def _base_aexit_callback(
-            callback_exc_type: type[BaseException] | None,
-            callback_exc_value: BaseException | None,
-            callback_traceback: TracebackType | None,
-        ) -> None:
-            await self._base_resolver.__aexit__(
-                callback_exc_type,
-                callback_exc_value,
-                callback_traceback,
-            )
-
-        if self._owned_scope_wrappers:
-            callbacks[:0] = [
-                (
-                    1,
-                    lambda callback_exc_type, callback_exc_value, callback_traceback, owned_scope_wrapper=owned_scope_wrapper: (
-                        owned_scope_wrapper.__aexit__(
+                    async def _base_aexit_callback(
+                        callback_exc_type: type[BaseException] | None,
+                        callback_exc_value: BaseException | None,
+                        callback_traceback: TracebackType | None,
+                    ) -> None:
+                        await self._base_resolver.__aexit__(
                             callback_exc_type,
                             callback_exc_value,
                             callback_traceback,
                         )
-                    ),
-                )
-                for owned_scope_wrapper in self._owned_scope_wrappers
-            ]
 
-        callbacks.append((1, _base_aexit_callback))
-        await _execute_async_cleanup_callbacks(
-            callbacks=callbacks,
-            exc_type=exc_type,
-            exc_value=exc_value,
-            traceback=traceback,
-        )
+                    callbacks.insert(0, (1, _base_aexit_callback))
+                    await _execute_async_cleanup_callbacks(
+                        callbacks=callbacks,
+                        exc_type=exc_type,
+                        exc_value=exc_value,
+                        traceback=traceback,
+                    )
+            except BaseException as error:  # noqa: BLE001
+                cleanup_error = error
+            cleanup_error = await self._close_owned_live_provider_rebounds_async(
+                exc_type=exc_type,
+                exc_value=exc_value,
+                traceback=traceback,
+                cleanup_error=cleanup_error,
+            )
+            if cleanup_error is not None:
+                raise cleanup_error
+        finally:
+            try:
+                self._clear_live_provider_rebounds()
+            finally:
+                _leave_live_provider_cleanup_context(token=cleanup_token)
 
     async def aclose(
         self,
@@ -910,6 +972,99 @@ class _OpenGenericResolver:  # pragma: no cover
         traceback: TracebackType | None = None,
     ) -> None:
         return await self.__aexit__(exc_type, exc_value, traceback)
+
+    def _begin_live_provider_close(self) -> None:
+        with self._live_provider_condition:
+            self._live_provider_closing = True
+            while self._live_provider_inflight:
+                self._live_provider_condition.wait()
+
+    async def _begin_live_provider_aclose(self) -> None:
+        while True:
+            with self._live_provider_lock:
+                self._live_provider_closing = True
+                if not self._live_provider_inflight:
+                    return
+            await asyncio.sleep(0.001)
+
+    def _clear_live_provider_rebounds(self) -> None:
+        with self._live_provider_lock:
+            self._owned_scope_wrappers = ()
+            self._live_provider_scope_cache.clear()
+
+    def _close_owned_live_provider_rebounds_sync(
+        self,
+        *,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+        cleanup_error: BaseException | None,
+    ) -> BaseException | None:
+        while self._owned_scope_wrappers:
+            owned_scope_wrappers = self._owned_scope_wrappers
+            self._owned_scope_wrappers = ()
+            for owned_scope_wrapper in reversed(owned_scope_wrappers):
+                cleanup_error = self._close_owned_live_provider_rebound_sync(
+                    owned_scope_wrapper=owned_scope_wrapper,
+                    exc_type=exc_type,
+                    exc_value=exc_value,
+                    traceback=traceback,
+                    cleanup_error=cleanup_error,
+                )
+        return cleanup_error
+
+    def _close_owned_live_provider_rebound_sync(
+        self,
+        *,
+        owned_scope_wrapper: _OpenGenericResolver,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+        cleanup_error: BaseException | None,
+    ) -> BaseException | None:
+        try:
+            owned_scope_wrapper.__exit__(exc_type, exc_value, traceback)
+        except BaseException as error:  # noqa: BLE001
+            if exc_type is None and cleanup_error is None:
+                cleanup_error = error
+        return cleanup_error
+
+    async def _close_owned_live_provider_rebounds_async(
+        self,
+        *,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+        cleanup_error: BaseException | None,
+    ) -> BaseException | None:
+        while self._owned_scope_wrappers:
+            owned_scope_wrappers = self._owned_scope_wrappers
+            self._owned_scope_wrappers = ()
+            for owned_scope_wrapper in reversed(owned_scope_wrappers):
+                cleanup_error = await self._close_owned_live_provider_rebound_async(
+                    owned_scope_wrapper=owned_scope_wrapper,
+                    exc_type=exc_type,
+                    exc_value=exc_value,
+                    traceback=traceback,
+                    cleanup_error=cleanup_error,
+                )
+        return cleanup_error
+
+    async def _close_owned_live_provider_rebound_async(
+        self,
+        *,
+        owned_scope_wrapper: _OpenGenericResolver,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+        cleanup_error: BaseException | None,
+    ) -> BaseException | None:
+        try:
+            await owned_scope_wrapper.__aexit__(exc_type, exc_value, traceback)
+        except BaseException as error:  # noqa: BLE001
+            if exc_type is None and cleanup_error is None:
+                cleanup_error = error
+        return cleanup_error
 
     def _resolve_open_match_sync(
         self,
@@ -1672,10 +1827,10 @@ class _OpenGenericResolver:  # pragma: no cover
         if not is_provider_annotation(dependency):
             return _MISSING_CACHE
         inner_dependency = strip_provider_annotation(dependency)
-        provider_factory = (
-            self.aresolve if is_async_provider_annotation(dependency) else self.resolve
+        return self._live_provider_handle(
+            dependency=inner_dependency,
+            is_async=is_async_provider_annotation(dependency),
         )
-        return lambda: provider_factory(inner_dependency)
 
     async def _resolve_async_annotation_preflight(self, *, dependency: Any) -> Any:
         maybe_value = await self._resolve_maybe_async(dependency=dependency)
@@ -1684,10 +1839,227 @@ class _OpenGenericResolver:  # pragma: no cover
         if not is_provider_annotation(dependency):
             return _MISSING_CACHE
         inner_dependency = strip_provider_annotation(dependency)
-        provider_factory = (
-            self.aresolve if is_async_provider_annotation(dependency) else self.resolve
+        return self._live_provider_handle(
+            dependency=inner_dependency,
+            is_async=is_async_provider_annotation(dependency),
         )
-        return lambda: provider_factory(inner_dependency)
+
+    def _live_provider_handle(self, *, dependency: Any, is_async: bool) -> Callable[[], Any]:
+        match = self._registry.find_best_match(dependency)
+        requires_same_revision_guard = match is None or match.spec.needs_cleanup
+        if is_async:
+            return self._async_live_provider_handle(
+                dependency=dependency,
+                requires_same_revision_guard=requires_same_revision_guard,
+            )
+        return self._sync_live_provider_handle(
+            dependency=dependency,
+            requires_same_revision_guard=requires_same_revision_guard,
+        )
+
+    def _async_live_provider_handle(
+        self,
+        *,
+        dependency: Any,
+        requires_same_revision_guard: bool,
+    ) -> Callable[[], Any]:
+        async_fast_resolver = self.aresolve
+        container = self._live_provider_container
+        compiled_graph_revision = self._live_provider_graph_revision
+        if container is None or compiled_graph_revision is None:
+            return lambda: async_fast_resolver(dependency)
+
+        async def _async_provider() -> Any:
+            current_graph_revision = getattr(container, "_graph_revision", compiled_graph_revision)
+            if (
+                current_graph_revision == compiled_graph_revision
+                and not requires_same_revision_guard
+            ):
+                return await async_fast_resolver(dependency)
+            provider_call_started = self._begin_original_live_provider_call(
+                current_graph_revision=current_graph_revision,
+                compiled_graph_revision=compiled_graph_revision,
+            )
+            try:
+                if current_graph_revision == compiled_graph_revision:
+                    return await async_fast_resolver(dependency)
+                target_resolver = self._stale_live_provider_target_resolver(
+                    current_graph_revision=current_graph_revision,
+                    expected_scope_epoch=self._live_provider_epoch,
+                )
+                target_call_started = _resolver_begin_live_provider_call(
+                    resolver=target_resolver,
+                )
+                try:
+                    return await target_resolver.aresolve(dependency)
+                finally:
+                    _resolver_end_live_provider_call(
+                        resolver=target_resolver,
+                        started=target_call_started,
+                    )
+            finally:
+                self._end_live_provider_call(started=provider_call_started)
+
+        return _async_provider
+
+    def _sync_live_provider_handle(
+        self,
+        *,
+        dependency: Any,
+        requires_same_revision_guard: bool,
+    ) -> Callable[[], Any]:
+        sync_fast_resolver = self.resolve
+        container = self._live_provider_container
+        compiled_graph_revision = self._live_provider_graph_revision
+        if container is None or compiled_graph_revision is None:
+            return lambda: sync_fast_resolver(dependency)
+
+        def _sync_provider() -> Any:
+            current_graph_revision = getattr(container, "_graph_revision", compiled_graph_revision)
+            if (
+                current_graph_revision == compiled_graph_revision
+                and not requires_same_revision_guard
+            ):
+                return sync_fast_resolver(dependency)
+            provider_call_started = self._begin_original_live_provider_call(
+                current_graph_revision=current_graph_revision,
+                compiled_graph_revision=compiled_graph_revision,
+            )
+            try:
+                if current_graph_revision == compiled_graph_revision:
+                    return sync_fast_resolver(dependency)
+                target_resolver = self._stale_live_provider_target_resolver(
+                    current_graph_revision=current_graph_revision,
+                    expected_scope_epoch=self._live_provider_epoch,
+                )
+                target_call_started = _resolver_begin_live_provider_call(
+                    resolver=target_resolver,
+                )
+                try:
+                    return target_resolver.resolve(dependency)
+                finally:
+                    _resolver_end_live_provider_call(
+                        resolver=target_resolver,
+                        started=target_call_started,
+                    )
+            finally:
+                self._end_live_provider_call(started=provider_call_started)
+
+        return _sync_provider
+
+    def _begin_original_live_provider_call(
+        self,
+        *,
+        current_graph_revision: int,
+        compiled_graph_revision: int,
+    ) -> bool:
+        if (
+            self._scope_level == self._root_scope.level
+            and current_graph_revision != compiled_graph_revision
+            and _in_live_provider_cleanup_context(resolver=self)
+        ):
+            return False
+        return self._begin_live_provider_call(expected_scope_epoch=self._live_provider_epoch)
+
+    def _stale_live_provider_target_resolver(
+        self,
+        *,
+        current_graph_revision: int,
+        expected_scope_epoch: int,
+    ) -> Any:
+        container = self._live_provider_container
+        if container is None:
+            return self
+
+        if self._scope_level == self._root_scope.level:
+            return self._live_provider_rebound_root_resolver(
+                graph_revision=current_graph_revision,
+                expected_scope_epoch=expected_scope_epoch,
+            )
+
+        cache_key = (current_graph_revision, self._scope_level)
+        with self._live_provider_lock:
+            self._raise_if_live_provider_scope_closed(
+                expected_scope_epoch=expected_scope_epoch,
+                allow_closing=True,
+            )
+
+            cached_resolver = self._live_provider_scope_cache.get(cache_key)
+            if cached_resolver is not None:
+                return cached_resolver
+
+            target_scope = self._live_provider_scope_by_level(scope_level=self._scope_level)
+            latest_root_resolver = _latest_container_base_resolver(container=container)
+            rebound_resolver = latest_root_resolver.enter_scope(target_scope)
+            self._live_provider_scope_cache[cache_key] = rebound_resolver
+            owned_scope_wrappers = cast("tuple[Any, ...]", self._owned_scope_wrappers)
+            self._owned_scope_wrappers = cast(
+                "tuple[_OpenGenericResolver, ...]",
+                (*owned_scope_wrappers, latest_root_resolver, rebound_resolver),
+            )
+            return rebound_resolver
+
+    def _live_provider_rebound_root_resolver(
+        self,
+        *,
+        graph_revision: int,
+        expected_scope_epoch: int,
+    ) -> Any:
+        container = self._live_provider_container
+        if container is None:
+            return self
+
+        cache_key = (graph_revision, self._scope_level)
+        with self._live_provider_lock:
+            self._raise_if_live_provider_scope_closed(
+                expected_scope_epoch=expected_scope_epoch,
+                allow_closing=True,
+            )
+
+            cached_resolver = self._live_provider_scope_cache.get(cache_key)
+            if cached_resolver is not None:
+                return cached_resolver
+
+            rebound_resolver = _latest_container_base_resolver(container=container)
+            self._live_provider_scope_cache[cache_key] = rebound_resolver
+            owned_scope_wrappers = cast("tuple[Any, ...]", self._owned_scope_wrappers)
+            self._owned_scope_wrappers = cast(
+                "tuple[_OpenGenericResolver, ...]",
+                (*owned_scope_wrappers, rebound_resolver),
+            )
+            return rebound_resolver
+
+    def _live_provider_scope_by_level(self, *, scope_level: int) -> BaseScope:
+        return next(scope for scope in self._managed_scopes if scope.level == scope_level)
+
+    def _begin_live_provider_call(self, *, expected_scope_epoch: int) -> bool:
+        with self._live_provider_lock:
+            self._raise_if_live_provider_scope_closed(
+                expected_scope_epoch=expected_scope_epoch,
+            )
+            self._live_provider_inflight += 1
+            return True
+
+    def _end_live_provider_call(self, *, started: bool) -> None:
+        if not started:
+            return
+
+        with self._live_provider_condition:
+            self._live_provider_inflight -= 1
+            self._live_provider_condition.notify_all()
+
+    def _raise_if_live_provider_scope_closed(
+        self,
+        *,
+        expected_scope_epoch: int,
+        allow_closing: bool = False,
+    ) -> None:
+        if (
+            (self._live_provider_closing and not allow_closing)
+            or not getattr(self._base_resolver, "_active", True)
+            or _resolver_live_provider_epoch(resolver=self._base_resolver) != expected_scope_epoch
+        ):
+            _raise_closed_live_provider_scope(scope_level=self._scope_level)
 
     @staticmethod
     def _missing_sync_inline_resolver() -> NoReturn:
@@ -1768,6 +2140,115 @@ def cast_mapping(value: Any) -> Mapping[str, Any]:
         return value
     msg = f"Expected mapping value for variadic keyword dependency, got {value!r}."
     raise TypeError(msg)
+
+
+def _enter_live_provider_cleanup_context(
+    *,
+    resolver: Any,
+) -> contextvars.Token[frozenset[int]]:
+    cleanup_resolver_ids = _LIVE_PROVIDER_CLEANUP_RESOLVER_IDS.get()
+    return _LIVE_PROVIDER_CLEANUP_RESOLVER_IDS.set(
+        cleanup_resolver_ids | frozenset((id(resolver),)),
+    )
+
+
+def _leave_live_provider_cleanup_context(
+    *,
+    token: contextvars.Token[frozenset[int]],
+) -> None:
+    _LIVE_PROVIDER_CLEANUP_RESOLVER_IDS.reset(token)
+
+
+def _in_live_provider_cleanup_context(*, resolver: Any) -> bool:
+    return id(resolver) in _LIVE_PROVIDER_CLEANUP_RESOLVER_IDS.get()
+
+
+def _latest_container_base_resolver(*, container: Any) -> Any:
+    resolver = container.compile()
+    return getattr(resolver, "_resolver", resolver)
+
+
+def _resolver_live_provider_epoch(*, resolver: Any) -> int:
+    return cast("int", getattr(resolver, "_live_provider_epoch", 0))
+
+
+def _resolver_live_provider_scope_level(*, resolver: Any) -> int | None:
+    if isinstance(resolver, _OpenGenericResolver):
+        return cast("int", object.__getattribute__(resolver, "_scope_level"))
+
+    runtime = getattr(type(resolver), "_runtime", None)
+    if runtime is None:
+        return None
+    root_scope_level = getattr(runtime, "root_scope_level", None)
+    if root_scope_level is None:
+        return None
+    class_plan = getattr(type(resolver), "_class_plan", None)
+    return cast("int", getattr(class_plan, "scope_level", root_scope_level))
+
+
+def _resolver_begin_live_provider_call(*, resolver: Any) -> bool:
+    scope_level = _resolver_live_provider_scope_level(resolver=resolver)
+    if scope_level is None:
+        return False
+
+    live_provider_lock = getattr(resolver, "_live_provider_lock", None)
+    if live_provider_lock is None:
+        _resolver_raise_if_live_provider_scope_closed(
+            resolver=resolver,
+            scope_level=scope_level,
+        )
+        return False
+
+    with live_provider_lock:
+        _resolver_raise_if_live_provider_scope_closed(
+            resolver=resolver,
+            scope_level=scope_level,
+        )
+        object.__setattr__(
+            resolver,
+            "_live_provider_inflight",
+            getattr(resolver, "_live_provider_inflight", 0) + 1,
+        )
+        return True
+
+
+def _resolver_end_live_provider_call(*, resolver: Any, started: bool) -> None:
+    if not started:
+        return
+
+    live_provider_condition = getattr(resolver, "_live_provider_condition", None)
+    if live_provider_condition is None:
+        return
+    with live_provider_condition:
+        object.__setattr__(
+            resolver,
+            "_live_provider_inflight",
+            getattr(resolver, "_live_provider_inflight", 0) - 1,
+        )
+        live_provider_condition.notify_all()
+
+
+def _resolver_raise_if_live_provider_scope_closed(
+    *,
+    resolver: Any,
+    scope_level: int,
+) -> None:
+    active_resolver = getattr(resolver, "_base_resolver", resolver)
+    default_active = active_resolver is not resolver
+    if not getattr(active_resolver, "_active", default_active) or getattr(
+        resolver,
+        "_live_provider_closing",
+        False,
+    ):
+        _raise_closed_live_provider_scope(scope_level=scope_level)
+
+
+def _raise_closed_live_provider_scope(*, scope_level: int) -> NoReturn:
+    msg = (
+        f"Provider handle created in scope level {scope_level} cannot resolve against "
+        "a newer container graph after that scope has closed or started closing."
+    )
+    raise DIWireScopeMismatchError(msg)
 
 
 def _build_binding_plan(

@@ -191,6 +191,7 @@ class Container:
 
         self._root_resolver: ResolverProtocol | None = None
         self._entered_root_resolver: ResolverProtocol | None = None
+        self._stale_root_resolvers: list[ResolverProtocol] = []
         self._graph_revision: int = 0
         self._registration_mutation_depth: int = 0
         self._registration_mutation_snapshot: _ContainerGraphSnapshot | None = None
@@ -3312,6 +3313,8 @@ class Container:
                 root_resolver = self._resolvers_manager.build_root_resolver(
                     root_scope=self._root_scope,
                     registrations=self._providers_registrations,
+                    live_provider_container=self,
+                    live_provider_graph_revision=self._graph_revision,
                 )
                 if self._open_generic_registry.has_specs():
                     has_async_specs = any(
@@ -3344,6 +3347,8 @@ class Container:
         """
         with self._graph_state_lock:
             self._graph_revision += 1
+            if self._root_resolver is not None:
+                self._stale_root_resolvers.append(self._root_resolver)
             self._root_resolver = None
             self._restore_container_entrypoints()
 
@@ -3687,16 +3692,50 @@ class Container:
         Cleanup will happen ONLY if the resolver created resources that need to be cleaned up.
         Like context managers or generators.
         """
-        active_resolver = (
-            self._entered_root_resolver
-            if self._entered_root_resolver is not None
-            else self._root_resolver
-        )
-        if active_resolver is None:
+        entered_resolver = self._entered_root_resolver
+        if (
+            entered_resolver is None
+            and self._root_resolver is None
+            and not self._stale_root_resolvers
+        ):
             msg = "Container context exit called without a matching enter."
             raise RuntimeError(msg)
+        cleanup_error: BaseException | None = None
+        closed_resolver_ids: set[int] = set()
         try:
-            return active_resolver.__exit__(exc_type, exc_value, traceback)
+            if entered_resolver is not None:
+                closed_resolver_ids.add(id(entered_resolver))
+                try:
+                    entered_resolver.__exit__(exc_type, exc_value, traceback)
+                except BaseException as error:  # noqa: BLE001
+                    cleanup_error = error
+
+            while self._stale_root_resolvers:
+                stale_resolver = self._stale_root_resolvers.pop(0)
+                if id(stale_resolver) in closed_resolver_ids:
+                    continue
+                closed_resolver_ids.add(id(stale_resolver))
+                try:
+                    stale_resolver.close(exc_type, exc_value, traceback)
+                except BaseException as error:  # noqa: BLE001
+                    if cleanup_error is None:
+                        cleanup_error = error
+
+            while self._root_resolver is not None:
+                current_resolver = self._root_resolver
+                if id(current_resolver) in closed_resolver_ids:
+                    break
+                if not _container_resolver_is_active(current_resolver):
+                    break
+                closed_resolver_ids.add(id(current_resolver))
+                try:
+                    current_resolver.close(exc_type, exc_value, traceback)
+                except BaseException as error:  # noqa: BLE001
+                    if cleanup_error is None:
+                        cleanup_error = error
+
+            if cleanup_error is not None:
+                raise cleanup_error
         finally:
             self._entered_root_resolver = None
 
@@ -3717,16 +3756,50 @@ class Container:
         Cleanup will happen ONLY if the resolver created resources that need to be cleaned up.
         Like context managers or generators.
         """
-        active_resolver = (
-            self._entered_root_resolver
-            if self._entered_root_resolver is not None
-            else self._root_resolver
-        )
-        if active_resolver is None:
+        entered_resolver = self._entered_root_resolver
+        if (
+            entered_resolver is None
+            and self._root_resolver is None
+            and not self._stale_root_resolvers
+        ):
             msg = "Container async context exit called without a matching enter."
             raise RuntimeError(msg)
+        cleanup_error: BaseException | None = None
+        closed_resolver_ids: set[int] = set()
         try:
-            return await active_resolver.__aexit__(exc_type, exc_value, traceback)
+            if entered_resolver is not None:
+                closed_resolver_ids.add(id(entered_resolver))
+                try:
+                    await entered_resolver.__aexit__(exc_type, exc_value, traceback)
+                except BaseException as error:  # noqa: BLE001
+                    cleanup_error = error
+
+            while self._stale_root_resolvers:
+                stale_resolver = self._stale_root_resolvers.pop(0)
+                if id(stale_resolver) in closed_resolver_ids:
+                    continue
+                closed_resolver_ids.add(id(stale_resolver))
+                try:
+                    await stale_resolver.aclose(exc_type, exc_value, traceback)
+                except BaseException as error:  # noqa: BLE001
+                    if cleanup_error is None:
+                        cleanup_error = error
+
+            while self._root_resolver is not None:
+                current_resolver = self._root_resolver
+                if id(current_resolver) in closed_resolver_ids:
+                    break
+                if not _container_resolver_is_active(current_resolver):
+                    break
+                closed_resolver_ids.add(id(current_resolver))
+                try:
+                    await current_resolver.aclose(exc_type, exc_value, traceback)
+                except BaseException as error:  # noqa: BLE001
+                    if cleanup_error is None:
+                        cleanup_error = error
+
+            if cleanup_error is not None:
+                raise cleanup_error
         finally:
             self._entered_root_resolver = None
 
@@ -3778,6 +3851,21 @@ class Container:
         return await self.__aexit__(exc_type, exc_value, traceback)
 
     # endregion Resolution and Scope Management
+
+
+def _container_resolver_is_active(resolver: Any) -> bool:
+    try:
+        wrapped_resolver = object.__getattribute__(resolver, "_resolver")
+    except AttributeError:
+        wrapped_resolver = resolver
+    try:
+        base_resolver = object.__getattribute__(wrapped_resolver, "_base_resolver")
+    except AttributeError:
+        base_resolver = wrapped_resolver
+    try:
+        return bool(object.__getattribute__(base_resolver, "_active"))
+    except AttributeError:
+        return True
 
 
 @dataclass(frozen=True, slots=True)

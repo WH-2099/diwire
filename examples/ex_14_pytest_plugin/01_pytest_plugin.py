@@ -1,7 +1,8 @@
 """Pytest plugin integration smoke test.
 
 Runs ``pytest -q test_demo.py`` in this folder to validate
-``diwire.integrations.pytest_plugin`` with ``Injected[T]`` test parameters.
+``diwire.integrations.pytest_plugin`` with ``Injected[T]`` and
+``Injected[AsyncProvider[T]]`` test parameters.
 """
 
 from __future__ import annotations

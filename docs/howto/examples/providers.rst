@@ -10,6 +10,7 @@ What you'll learn
 - Break dependency cycles with ``Provider[T]``.
 - Defer expensive object construction.
 - Observe scoped vs transient behavior through provider calls.
+- Use already-created provider handles after registration updates.
 
 Break cycle provider
 --------------------
@@ -50,5 +51,19 @@ Run locally
    uv run python examples/ex_20_providers/03_provider_lifetime_semantics.py
 
 .. literalinclude:: ../../../examples/ex_20_providers/03_provider_lifetime_semantics.py
+   :language: python
+   :class: diwire-example py-run
+
+Live registration updates
+-------------------------
+
+Run locally
+~~~~~~~~~~~
+
+.. code-block:: bash
+
+   uv run python examples/ex_20_providers/04_live_registration_updates.py
+
+.. literalinclude:: ../../../examples/ex_20_providers/04_live_registration_updates.py
    :language: python
    :class: diwire-example py-run

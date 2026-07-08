@@ -210,6 +210,7 @@ def _runtime(
         has_cleanup=True,
         dep_registered_keys=set(),
         all_slots_by_key={} if all_slots_by_key is None else all_slots_by_key,
+        dep_slot_by_key={workflow.provides: workflow.slot for workflow in workflows},
         dep_eq_slot_by_key={} if dep_eq_slot_by_key is None else dep_eq_slot_by_key,
         dep_type_by_slot={workflow.slot: workflow.provides for workflow in workflows}
         if dep_type_by_slot is None
@@ -2575,6 +2576,33 @@ def test_resolve_dependency_value_sync_async_provider_handle_branch() -> None:
     assert asyncio.run(cast("Any", handle)()) == 77
 
 
+def test_live_provider_handle_snapshot_dispatch_branches() -> None:
+    class _SnapshotResolver:
+        def resolve(self, dependency: object) -> tuple[str, object]:
+            return ("sync", dependency)
+
+        async def aresolve(self, dependency: object) -> tuple[str, object]:
+            return ("async", dependency)
+
+    resolver = _SnapshotResolver()
+
+    sync_handle = compiler_module._live_provider_handle(
+        resolver,
+        int,
+        None,
+        is_async=False,
+    )
+    async_handle = compiler_module._live_provider_handle(
+        resolver,
+        str,
+        None,
+        is_async=True,
+    )
+
+    assert sync_handle() == ("sync", int)
+    assert asyncio.run(cast("Any", async_handle)()) == ("async", str)
+
+
 def test_resolver_scope_level_branch() -> None:
     resolver_type = type("ScopedResolver", (), {"_class_plan": SimpleNamespace(scope_level=9)})
     assert compiler_module._resolver_scope_level(resolver_type()) == 9
@@ -3057,6 +3085,229 @@ def test_execute_fast_single_cleanup_sync_tuple_unknown_kind_falls_back_to_close
     assert cleanup.closed is True
     assert resolver._cleanup_callback_single is None
     assert resolver._active is False
+
+
+def test_execute_fast_single_cleanup_sync_non_tuple_cleanup_closes() -> None:
+    class _CloseTracker:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    cleanup = _CloseTracker()
+    resolver = SimpleNamespace(
+        _cleanup_callback_single=cleanup,
+        _active=True,
+    )
+
+    compiler_module._execute_fast_single_cleanup_sync(
+        self=resolver,
+        single_cleanup=resolver._cleanup_callback_single,
+    )
+
+    assert cleanup.closed is True
+    assert resolver._cleanup_callback_single is None
+    assert resolver._active is False
+
+
+def test_live_provider_state_helpers_cover_lock_and_cache_branches() -> None:
+    reset_resolver = SimpleNamespace(
+        _owned_scope_resolvers=("owned",),
+        _live_provider_scope_cache={1: "cached"},
+        _live_provider_lock=None,
+        _live_provider_closing=True,
+        _live_provider_epoch=7,
+    )
+    compiler_module._resolver_reset_live_provider_state(reset_resolver)
+
+    assert reset_resolver._owned_scope_resolvers == ()
+    assert reset_resolver._live_provider_scope_cache is None
+    assert reset_resolver._live_provider_lock is None
+    assert reset_resolver._live_provider_closing is False
+    assert reset_resolver._live_provider_epoch == 8
+
+    locked_resolver_without_cache = SimpleNamespace(
+        _owned_scope_resolvers=("owned",),
+        _live_provider_lock=threading.RLock(),
+    )
+    compiler_module._resolver_clear_live_provider_rebounds(locked_resolver_without_cache)
+    assert locked_resolver_without_cache._owned_scope_resolvers == ()
+
+    unlocked_resolver_with_cache = SimpleNamespace(
+        _owned_scope_resolvers=("owned",),
+        _live_provider_scope_cache={1: "cached"},
+    )
+    compiler_module._resolver_clear_live_provider_rebounds(unlocked_resolver_with_cache)
+    assert unlocked_resolver_with_cache._owned_scope_resolvers == ()
+    assert unlocked_resolver_with_cache._live_provider_scope_cache is None
+
+    resolver_with_cache_without_flags = SimpleNamespace(
+        _live_provider_scope_cache={},
+        _live_provider_lock=None,
+    )
+    compiler_module._resolver_ensure_live_provider_state(resolver_with_cache_without_flags)
+    assert resolver_with_cache_without_flags._live_provider_scope_cache == {}
+    assert resolver_with_cache_without_flags._live_provider_lock is not None
+    assert resolver_with_cache_without_flags._live_provider_inflight == 0
+    assert resolver_with_cache_without_flags._live_provider_closing is False
+
+    resolver_without_condition = SimpleNamespace(_live_provider_inflight=1)
+    compiler_module._resolver_end_live_provider_call(
+        resolver=resolver_without_condition,
+        started=True,
+    )
+    assert resolver_without_condition._live_provider_inflight == 1
+
+
+@pytest.mark.asyncio
+async def test_guarded_provider_handles_call_same_revision_fast_path_with_guard() -> None:
+    async def _async_value() -> str:
+        return "async"
+
+    container = SimpleNamespace(_graph_revision=1)
+    runtime = SimpleNamespace()
+    sync_resolver = SimpleNamespace(
+        _active=True,
+        _live_provider_epoch=0,
+        _live_provider_closing=False,
+        _owned_scope_resolvers=(),
+    )
+    async_resolver = SimpleNamespace(
+        _active=True,
+        _live_provider_epoch=0,
+        _live_provider_closing=False,
+        _owned_scope_resolvers=(),
+    )
+
+    sync_handle = compiler_module._guarded_sync_live_provider_handle(
+        container=container,
+        compiled_graph_revision=1,
+        dependency=int,
+        resolver=sync_resolver,
+        runtime=cast("Any", runtime),
+        expected_scope_epoch=0,
+        provider_scope_level=Scope.REQUEST.level,
+        provider_is_root_scope=False,
+        requires_same_revision_guard=True,
+        fast_call=lambda: "sync",
+    )
+    async_handle = compiler_module._guarded_async_live_provider_handle(
+        container=container,
+        compiled_graph_revision=1,
+        dependency=int,
+        resolver=async_resolver,
+        runtime=cast("Any", runtime),
+        expected_scope_epoch=0,
+        provider_scope_level=Scope.REQUEST.level,
+        provider_is_root_scope=False,
+        requires_same_revision_guard=True,
+        fast_call=_async_value,
+    )
+
+    assert sync_handle() == "sync"
+    assert await async_handle() == "async"
+    assert sync_resolver._live_provider_inflight == 0
+    assert async_resolver._live_provider_inflight == 0
+
+
+def test_live_provider_rebound_scoped_resolver_allows_close_after_provider_call_started() -> None:
+    resolver = SimpleNamespace(
+        _active=True,
+        _live_provider_closing=True,
+        _live_provider_scope_cache={},
+        _live_provider_lock=threading.RLock(),
+        _owned_scope_resolvers=(),
+    )
+    runtime = SimpleNamespace(scope_obj_by_level={Scope.REQUEST.level: Scope.REQUEST})
+
+    rebound_resolver = compiler_module._live_provider_rebound_scoped_resolver(
+        resolver=resolver,
+        runtime=cast("Any", runtime),
+        container=Container(),
+        graph_revision=1,
+        scope_level=Scope.REQUEST.level,
+        expected_scope_epoch=0,
+    )
+
+    assert resolver._live_provider_scope_cache[(1, Scope.REQUEST.level)] is rebound_resolver
+    assert resolver._owned_scope_resolvers[-1] is rebound_resolver
+    assert len(resolver._owned_scope_resolvers) == 2
+
+
+def test_live_provider_scope_check_without_lock_uses_epoch() -> None:
+    class _RequestScopedResolverForEpochTest:
+        _class_plan = SimpleNamespace(scope_level=Scope.REQUEST.level)
+        _active = True
+        _live_provider_closing = False
+        _live_provider_epoch = 2
+
+    resolver = _RequestScopedResolverForEpochTest()
+    runtime = SimpleNamespace(root_scope_level=Scope.APP.level)
+    scope_level = compiler_module._resolver_live_provider_scope_level(
+        resolver=resolver,
+        runtime=cast("Any", runtime),
+    )
+
+    assert scope_level == Scope.REQUEST.level
+
+    compiler_module._resolver_require_live_provider_scope_fast(
+        resolver=resolver,
+        scope_level=scope_level,
+        expected_scope_epoch=2,
+    )
+
+    with pytest.raises(DIWireScopeMismatchError, match="scope has closed"):
+        compiler_module._resolver_require_live_provider_scope_fast(
+            resolver=resolver,
+            scope_level=scope_level,
+            expected_scope_epoch=1,
+        )
+
+    compiler_module._resolver_require_live_provider_scope_fast(
+        resolver=resolver,
+        scope_level=None,
+        expected_scope_epoch=1,
+    )
+    assert (
+        compiler_module._resolver_begin_live_provider_call(
+            resolver=resolver,
+            scope_level=None,
+            expected_scope_epoch=1,
+        )
+        is False
+    )
+    assert (
+        compiler_module._resolver_begin_live_provider_call(
+            resolver=resolver,
+            scope_level=scope_level,
+            expected_scope_epoch=2,
+        )
+        is True
+    )
+    compiler_module._resolver_end_live_provider_call(resolver=resolver, started=True)
+
+    assert (
+        compiler_module._resolver_live_provider_scope_level(
+            resolver=SimpleNamespace(),
+            runtime=None,
+        )
+        is None
+    )
+    assert (
+        compiler_module._resolver_live_provider_scope_level(
+            resolver=SimpleNamespace(_base_resolver=object(), _scope_level=Scope.APP.level),
+            runtime=None,
+        )
+        == Scope.APP.level
+    )
+    assert (
+        compiler_module._resolver_live_provider_scope_level(
+            resolver=SimpleNamespace(_base_resolver=object()),
+            runtime=None,
+        )
+        is None
+    )
 
 
 @pytest.mark.asyncio

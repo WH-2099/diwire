@@ -123,5 +123,7 @@ class BuildRootResolverFunctionProtocol(Protocol):
         registrations: ProvidersRegistrations,
         *,
         cleanup_enabled: bool = True,
+        live_provider_container: object | None = None,
+        live_provider_graph_revision: int | None = None,
     ) -> ResolverProtocol:
         """Get the root resolver for the given registrations."""

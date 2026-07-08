@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextvars import ContextVar
+from types import TracebackType
 from typing import Any, cast
 
 import pytest
@@ -16,6 +17,62 @@ from diwire.exceptions import (
 class _Service:
     def __init__(self, value: str) -> None:
         self.value = value
+
+
+class _FakeSyncResolver:
+    def __init__(self, *, close_error: str | None = None, exit_error: str | None = None) -> None:
+        self.close_error = close_error
+        self.exit_error = exit_error
+        self.close_called = False
+        self.exit_called = False
+
+    def close(
+        self,
+        exc_type: type[BaseException] | None = None,
+        exc_value: BaseException | None = None,
+        traceback: Any = None,
+    ) -> None:
+        self.close_called = True
+        if self.close_error is not None:
+            raise RuntimeError(self.close_error)
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.exit_called = True
+        if self.exit_error is not None:
+            raise RuntimeError(self.exit_error)
+
+
+class _FakeAsyncResolver:
+    def __init__(self, *, close_error: str | None = None, exit_error: str | None = None) -> None:
+        self.close_error = close_error
+        self.exit_error = exit_error
+        self.close_called = False
+        self.exit_called = False
+
+    async def aclose(
+        self,
+        exc_type: type[BaseException] | None = None,
+        exc_value: BaseException | None = None,
+        traceback: Any = None,
+    ) -> None:
+        self.close_called = True
+        if self.close_error is not None:
+            raise RuntimeError(self.close_error)
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.exit_called = True
+        if self.exit_error is not None:
+            raise RuntimeError(self.exit_error)
 
 
 def test_top_level_resolver_context_export_is_available() -> None:
@@ -35,12 +92,271 @@ def test_removed_enter_scope_context_kwarg_raises_type_error() -> None:
         container.enter_scope(Scope.REQUEST, **kwargs)  # type: ignore[arg-type]
 
 
+def test_container_exit_closes_current_and_entered_root_resolvers() -> None:
+    container = Container()
+    entered_resolver = _FakeSyncResolver()
+    current_resolver = _FakeSyncResolver()
+    container._entered_root_resolver = cast("Any", entered_resolver)
+    container._root_resolver = cast("Any", current_resolver)
+
+    container.__exit__(None, None, None)
+
+    assert current_resolver.close_called is True
+    assert entered_resolver.exit_called is True
+    assert container._entered_root_resolver is None
+
+
+def test_container_exit_reports_entered_cleanup_error_after_current_cleanup() -> None:
+    container = Container()
+    entered_resolver = _FakeSyncResolver(exit_error="entered boom")
+    current_resolver = _FakeSyncResolver(close_error="current boom")
+    container._entered_root_resolver = cast("Any", entered_resolver)
+    container._root_resolver = cast("Any", current_resolver)
+
+    with pytest.raises(RuntimeError, match="entered boom"):
+        container.__exit__(None, None, None)
+
+    assert current_resolver.close_called is True
+    assert entered_resolver.exit_called is True
+    assert container._entered_root_resolver is None
+
+
+def test_container_exit_reports_current_error_after_entered_cleanup_succeeds() -> None:
+    container = Container()
+    entered_resolver = _FakeSyncResolver()
+    current_resolver = _FakeSyncResolver(close_error="current boom")
+    container._entered_root_resolver = cast("Any", entered_resolver)
+    container._root_resolver = cast("Any", current_resolver)
+
+    with pytest.raises(RuntimeError, match="current boom"):
+        container.__exit__(None, None, None)
+
+    assert current_resolver.close_called is True
+    assert entered_resolver.exit_called is True
+
+
+def test_container_exit_with_entered_resolver_and_no_current_resolver() -> None:
+    container = Container()
+    entered_resolver = _FakeSyncResolver()
+    container._entered_root_resolver = cast("Any", entered_resolver)
+
+    container.__exit__(None, None, None)
+
+    assert entered_resolver.exit_called is True
+
+
+def test_container_exit_reports_entered_cleanup_error() -> None:
+    container = Container()
+    entered_resolver = _FakeSyncResolver(exit_error="entered boom")
+    current_resolver = _FakeSyncResolver()
+    container._entered_root_resolver = cast("Any", entered_resolver)
+    container._root_resolver = cast("Any", current_resolver)
+
+    with pytest.raises(RuntimeError, match="entered boom"):
+        container.__exit__(None, None, None)
+
+    assert current_resolver.close_called is True
+    assert entered_resolver.exit_called is True
+
+
+def test_container_exit_with_only_current_resolver_reports_cleanup_error() -> None:
+    container = Container()
+    current_resolver = _FakeSyncResolver(close_error="current boom")
+    container._root_resolver = cast("Any", current_resolver)
+
+    with pytest.raises(RuntimeError, match="current boom"):
+        container.__exit__(None, None, None)
+
+    assert current_resolver.close_called is True
+
+
+def test_container_exit_reports_stale_root_cleanup_error() -> None:
+    container = Container()
+    stale_resolver = _FakeSyncResolver(close_error="stale boom")
+    container._stale_root_resolvers.append(cast("Any", stale_resolver))
+
+    with pytest.raises(RuntimeError, match="stale boom"):
+        container.__exit__(None, None, None)
+
+    assert stale_resolver.close_called is True
+    assert container._stale_root_resolvers == []
+
+
+def test_container_exit_continues_after_stale_root_cleanup_error() -> None:
+    container = Container()
+    first_resolver = _FakeSyncResolver(close_error="stale boom")
+    second_resolver = _FakeSyncResolver()
+    container._stale_root_resolvers.extend(
+        [cast("Any", first_resolver), cast("Any", second_resolver)]
+    )
+
+    with pytest.raises(RuntimeError, match="stale boom"):
+        container.__exit__(None, None, None)
+
+    assert first_resolver.close_called is True
+    assert second_resolver.close_called is True
+    assert container._stale_root_resolvers == []
+
+
+def test_container_exit_preserves_entered_error_after_stale_root_cleanup_error() -> None:
+    container = Container()
+    entered_resolver = _FakeSyncResolver(exit_error="entered boom")
+    stale_resolver = _FakeSyncResolver(close_error="stale boom")
+    container._entered_root_resolver = cast("Any", entered_resolver)
+    container._stale_root_resolvers.append(cast("Any", stale_resolver))
+
+    with pytest.raises(RuntimeError, match="entered boom"):
+        container.__exit__(None, None, None)
+
+    assert entered_resolver.exit_called is True
+    assert stale_resolver.close_called is True
+    assert container._stale_root_resolvers == []
+
+
+@pytest.mark.asyncio
+async def test_container_async_exit_closes_current_and_entered_root_resolvers() -> None:
+    container = Container()
+    entered_resolver = _FakeAsyncResolver()
+    current_resolver = _FakeAsyncResolver()
+    container._entered_root_resolver = cast("Any", entered_resolver)
+    container._root_resolver = cast("Any", current_resolver)
+
+    await container.__aexit__(None, None, None)
+
+    assert current_resolver.close_called is True
+    assert entered_resolver.exit_called is True
+    assert container._entered_root_resolver is None
+
+
+@pytest.mark.asyncio
+async def test_container_async_exit_reports_entered_cleanup_error_after_current_cleanup() -> None:
+    container = Container()
+    entered_resolver = _FakeAsyncResolver(exit_error="entered boom")
+    current_resolver = _FakeAsyncResolver(close_error="current boom")
+    container._entered_root_resolver = cast("Any", entered_resolver)
+    container._root_resolver = cast("Any", current_resolver)
+
+    with pytest.raises(RuntimeError, match="entered boom"):
+        await container.__aexit__(None, None, None)
+
+    assert current_resolver.close_called is True
+    assert entered_resolver.exit_called is True
+    assert container._entered_root_resolver is None
+
+
+@pytest.mark.asyncio
+async def test_container_async_exit_reports_current_error_after_entered_cleanup_succeeds() -> None:
+    container = Container()
+    entered_resolver = _FakeAsyncResolver()
+    current_resolver = _FakeAsyncResolver(close_error="current boom")
+    container._entered_root_resolver = cast("Any", entered_resolver)
+    container._root_resolver = cast("Any", current_resolver)
+
+    with pytest.raises(RuntimeError, match="current boom"):
+        await container.__aexit__(None, None, None)
+
+    assert current_resolver.close_called is True
+    assert entered_resolver.exit_called is True
+
+
+@pytest.mark.asyncio
+async def test_container_async_exit_with_entered_resolver_and_no_current_resolver() -> None:
+    container = Container()
+    entered_resolver = _FakeAsyncResolver()
+    container._entered_root_resolver = cast("Any", entered_resolver)
+
+    await container.__aexit__(None, None, None)
+
+    assert entered_resolver.exit_called is True
+
+
+@pytest.mark.asyncio
+async def test_container_async_exit_reports_entered_cleanup_error() -> None:
+    container = Container()
+    entered_resolver = _FakeAsyncResolver(exit_error="entered boom")
+    current_resolver = _FakeAsyncResolver()
+    container._entered_root_resolver = cast("Any", entered_resolver)
+    container._root_resolver = cast("Any", current_resolver)
+
+    with pytest.raises(RuntimeError, match="entered boom"):
+        await container.__aexit__(None, None, None)
+
+    assert current_resolver.close_called is True
+    assert entered_resolver.exit_called is True
+
+
+@pytest.mark.asyncio
+async def test_container_async_exit_with_only_current_resolver_reports_cleanup_error() -> None:
+    container = Container()
+    current_resolver = _FakeAsyncResolver(close_error="current boom")
+    container._root_resolver = cast("Any", current_resolver)
+
+    with pytest.raises(RuntimeError, match="current boom"):
+        await container.__aexit__(None, None, None)
+
+    assert current_resolver.close_called is True
+
+
+@pytest.mark.asyncio
+async def test_container_async_exit_reports_stale_root_cleanup_error() -> None:
+    container = Container()
+    stale_resolver = _FakeAsyncResolver(close_error="stale boom")
+    container._stale_root_resolvers.append(cast("Any", stale_resolver))
+
+    with pytest.raises(RuntimeError, match="stale boom"):
+        await container.__aexit__(None, None, None)
+
+    assert stale_resolver.close_called is True
+    assert container._stale_root_resolvers == []
+
+
+@pytest.mark.asyncio
+async def test_container_async_exit_continues_after_stale_root_cleanup_error() -> None:
+    container = Container()
+    first_resolver = _FakeAsyncResolver(close_error="stale boom")
+    second_resolver = _FakeAsyncResolver()
+    container._stale_root_resolvers.extend(
+        [cast("Any", first_resolver), cast("Any", second_resolver)]
+    )
+
+    with pytest.raises(RuntimeError, match="stale boom"):
+        await container.__aexit__(None, None, None)
+
+    assert first_resolver.close_called is True
+    assert second_resolver.close_called is True
+    assert container._stale_root_resolvers == []
+
+
+@pytest.mark.asyncio
+async def test_container_async_exit_preserves_entered_error_after_stale_cleanup_error() -> None:
+    container = Container()
+    entered_resolver = _FakeAsyncResolver(exit_error="entered boom")
+    stale_resolver = _FakeAsyncResolver(close_error="stale boom")
+    container._entered_root_resolver = cast("Any", entered_resolver)
+    container._stale_root_resolvers.append(cast("Any", stale_resolver))
+
+    with pytest.raises(RuntimeError, match="entered boom"):
+        await container.__aexit__(None, None, None)
+
+    assert entered_resolver.exit_called is True
+    assert stale_resolver.close_called is True
+    assert container._stale_root_resolvers == []
+
+
 def test_resolver_context_does_not_expose_resolver_stack_mutators() -> None:
     context = ResolverContext()
 
     assert not hasattr(context, "push_resolver")
     assert not hasattr(context, "pop_resolver")
     assert not hasattr(context, "wrap_resolver")
+
+
+def test_resolver_context_empty_pop_is_noop() -> None:
+    context = ResolverContext()
+
+    context._pop()
+
+    assert context._get_bound_resolver_or_none() is None
 
 
 def test_resolve_raises_when_no_bound_resolver_and_no_fallback_container() -> None:

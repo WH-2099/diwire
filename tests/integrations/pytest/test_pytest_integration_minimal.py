@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from diwire import Container, Injected, Lifetime
+from diwire import AsyncProvider, Container, Injected, Lifetime
 
 pytest_plugins = ["diwire.integrations.pytest_plugin"]
 
@@ -12,6 +12,10 @@ class _Service:
 
 
 class _FakeService(_Service):
+    pass
+
+
+class _UpdatedService(_Service):
     pass
 
 
@@ -44,6 +48,32 @@ async def test_async_test_functions_support_injected_parameters(
     service: Injected[_Service],
 ) -> None:
     assert isinstance(service, _FakeService)
+
+
+@pytest.mark.asyncio
+async def test_async_provider_injected_parameter_sees_container_mutation_before_first_call(
+    diwire_container: Container,
+    service_provider: Injected[AsyncProvider[_Service]],
+) -> None:
+    diwire_container.add_instance(_UpdatedService(), provides=_Service)
+
+    service = await service_provider()
+
+    assert isinstance(service, _UpdatedService)
+
+
+@pytest.mark.asyncio
+async def test_async_provider_injected_parameter_sees_mutation_after_first_call(
+    diwire_container: Container,
+    service_provider: Injected[AsyncProvider[_Service]],
+) -> None:
+    before = await service_provider()
+
+    diwire_container.add_instance(_UpdatedService(), provides=_Service)
+    after = await service_provider()
+
+    assert isinstance(before, _FakeService)
+    assert isinstance(after, _UpdatedService)
 
 
 def test_regular_fixture_resolution_still_works_without_injected_parameters(value: int) -> None:

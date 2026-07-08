@@ -595,6 +595,111 @@ def test_open_generic_resolver_cache_first_touch_preserves_concurrent_writes() -
         assert resolver.get_cached(dependency) == dependency
 
 
+def test_live_provider_scope_level_uses_runtime_root_and_class_plan() -> None:
+    class _RuntimeWithoutRoot:
+        root_scope_level = None
+
+    class _ResolverWithoutRoot:
+        _runtime = _RuntimeWithoutRoot()
+
+    class _RuntimeWithRoot:
+        root_scope_level = 1
+
+    class _ClassPlan:
+        scope_level = 2
+
+    class _ResolverWithPlan:
+        _runtime = _RuntimeWithRoot()
+        _class_plan = _ClassPlan()
+
+    class _ResolverWithRootOnly:
+        _runtime = _RuntimeWithRoot()
+
+    assert (
+        open_generics._resolver_live_provider_scope_level(resolver=_ResolverWithoutRoot()) is None
+    )
+    assert open_generics._resolver_live_provider_scope_level(resolver=_ResolverWithPlan()) == 2
+    assert open_generics._resolver_live_provider_scope_level(resolver=_ResolverWithRootOnly()) == 1
+
+
+def test_live_provider_call_accounting_for_latest_resolver() -> None:
+    class _Runtime:
+        root_scope_level = 1
+
+    class _Resolver:
+        _runtime = _Runtime()
+
+        def __init__(self) -> None:
+            self._active = True
+            self._live_provider_lock = threading.RLock()
+            self._live_provider_condition = threading.Condition(self._live_provider_lock)
+            self._live_provider_inflight = 0
+
+    resolver = _Resolver()
+
+    assert open_generics._resolver_begin_live_provider_call(resolver=resolver) is True
+    assert resolver._live_provider_inflight == 1
+
+    open_generics._resolver_end_live_provider_call(resolver=resolver, started=True)
+    open_generics._resolver_end_live_provider_call(resolver=resolver, started=False)
+
+    assert resolver._live_provider_inflight == 0
+
+
+def test_live_provider_call_accounting_without_lock_or_condition() -> None:
+    class _ResolverWithoutRuntime:
+        pass
+
+    class _Runtime:
+        root_scope_level = 1
+
+    class _ResolverWithoutLock:
+        _runtime = _Runtime()
+        _active = True
+
+    class _ResolverWithoutCondition:
+        _runtime = _Runtime()
+        _active = True
+
+        def __init__(self) -> None:
+            self._live_provider_lock = threading.RLock()
+
+    assert (
+        open_generics._resolver_begin_live_provider_call(resolver=_ResolverWithoutRuntime())
+        is False
+    )
+    assert (
+        open_generics._resolver_begin_live_provider_call(resolver=_ResolverWithoutLock()) is False
+    )
+    open_generics._resolver_end_live_provider_call(
+        resolver=_ResolverWithoutCondition(),
+        started=True,
+    )
+
+
+def test_live_provider_call_accounting_rejects_closed_latest_resolver() -> None:
+    class _Runtime:
+        root_scope_level = 1
+
+    class _Resolver:
+        _runtime = _Runtime()
+
+        def __init__(self) -> None:
+            self._active = True
+            self._live_provider_closing = False
+            self._live_provider_lock = threading.RLock()
+
+    inactive_resolver = _Resolver()
+    inactive_resolver._active = False
+    closing_resolver = _Resolver()
+    closing_resolver._live_provider_closing = True
+
+    with pytest.raises(DIWireScopeMismatchError):
+        open_generics._resolver_begin_live_provider_call(resolver=inactive_resolver)
+    with pytest.raises(DIWireScopeMismatchError):
+        open_generics._resolver_begin_live_provider_call(resolver=closing_resolver)
+
+
 def test_open_generic_resolver_materialization_callback_runs_once_under_concurrency() -> None:
     registry = open_generics.OpenGenericRegistry()
     registry.register(

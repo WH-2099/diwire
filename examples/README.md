@@ -1675,6 +1675,7 @@ Files:
 - [01_break_cycle_provider.py](#ex-20-providers--01-break-cycle-provider-py)
 - [02_lazy_construction_provider.py](#ex-20-providers--02-lazy-construction-provider-py)
 - [03_provider_lifetime_semantics.py](#ex-20-providers--03-provider-lifetime-semantics-py)
+- [04_live_registration_updates.py](#ex-20-providers--04-live-registration-updates-py)
 
 <a id="ex-20-providers--01-break-cycle-provider-py"></a>
 ### [01_break_cycle_provider.py](ex_20_providers/01_break_cycle_provider.py)
@@ -1819,6 +1820,52 @@ def main() -> None:
     print(f"scoped_same_identity={scoped_same}")  # => scoped_same_identity=True
     print(f"transient_after_calls={transient_calls}")  # => transient_after_calls=2
     print(f"transient_same_identity={transient_same}")  # => transient_same_identity=False
+
+
+if __name__ == "__main__":
+    main()
+```
+
+<a id="ex-20-providers--04-live-registration-updates-py"></a>
+### [04_live_registration_updates.py](ex_20_providers/04_live_registration_updates.py)
+
+Focused example: provider handles observe registration updates.
+
+```python
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from diwire import Container, Provider
+
+
+@dataclass(slots=True)
+class Service:
+    value: str
+
+
+class UsesServiceProvider:
+    def __init__(self, service_provider: Provider[Service]) -> None:
+        self._service_provider = service_provider
+
+    def get_service(self) -> Service:
+        return self._service_provider()
+
+
+def main() -> None:
+    container = Container()
+    container.add_instance(Service("old"), provides=Service)
+    container.add(UsesServiceProvider)
+
+    consumer = container.resolve(UsesServiceProvider)
+    direct_provider = container.resolve(Provider[Service])
+
+    container.add_instance(Service("new"), provides=Service)
+
+    print(
+        f"constructor_provider_value={consumer.get_service().value}"
+    )  # => constructor_provider_value=new
+    print(f"direct_provider_value={direct_provider().value}")  # => direct_provider_value=new
 
 
 if __name__ == "__main__":
@@ -3577,7 +3624,8 @@ Files:
 Pytest plugin integration smoke test.
 
 Runs ``pytest -q test_demo.py`` in this folder to validate
-``diwire.integrations.pytest_plugin`` with ``Injected[T]`` test parameters.
+``diwire.integrations.pytest_plugin`` with ``Injected[T]`` and
+``Injected[AsyncProvider[T]]`` test parameters.
 
 ```python
 from __future__ import annotations
@@ -3611,7 +3659,7 @@ from __future__ import annotations
 
 import pytest
 
-from diwire import Container, Injected, Lifetime
+from diwire import AsyncProvider, Container, Injected, Lifetime
 
 pytest_plugins = ["diwire.integrations.pytest_plugin"]
 
@@ -3621,6 +3669,10 @@ class Service:
 
 
 class ServiceImpl(Service):
+    pass
+
+
+class UpdatedService(Service):
     pass
 
 
@@ -3638,6 +3690,25 @@ def diwire_container() -> Container:
 def test_plugin_injects_parameters(service: Injected[Service]) -> None:
     if not isinstance(service, ServiceImpl):
         msg = "Injected service is not ServiceImpl"
+        raise TypeError(msg)
+
+
+@pytest.mark.asyncio
+async def test_async_provider_sees_test_override(
+    diwire_container: Container,
+    service_provider: Injected[AsyncProvider[Service]],
+) -> None:
+    before = await service_provider()
+
+    diwire_container.add_instance(UpdatedService(), provides=Service)
+    after = await service_provider()
+
+    if not isinstance(before, ServiceImpl):
+        msg = "Injected async provider did not use original Service"
+        raise TypeError(msg)
+
+    if not isinstance(after, UpdatedService):
+        msg = "Injected async provider did not use updated Service"
         raise TypeError(msg)
 ```
 
