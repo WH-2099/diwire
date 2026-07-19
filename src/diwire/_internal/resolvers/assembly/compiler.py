@@ -27,7 +27,11 @@ from diwire._internal.markers import (
     strip_non_component_annotation,
     strip_provider_annotation,
 )
-from diwire._internal.providers import ProviderDependency, ProvidersRegistrations
+from diwire._internal.providers import (
+    MaterializedProviderCallPlan,
+    ProviderDependency,
+    ProvidersRegistrations,
+)
 from diwire._internal.resolvers.assembly.planner import (
     ProviderDependencyPlan,
     ProviderWorkflowPlan,
@@ -53,9 +57,56 @@ _FALLBACK_ARGUMENT_EXPRESSION: Final[Any] = object()
 _OMIT_ARGUMENT: Final[Any] = object()
 _FILENAME: Final[str] = "<diwire-resolver>"
 _DISPATCH_CACHE_WORKFLOW_THRESHOLD: Final[int] = 4
+_SYNC_TRANSIENT_INLINE_MAX_DEPTH: Final[int] = 6
+_SYNC_TRANSIENT_INLINE_MAX_NON_LEAF_NODES: Final[int] = 8
+_SYNC_TRANSIENT_INLINE_DEPENDENCY_KINDS: Final[frozenset[str]] = frozenset(
+    {"literal", "omit", "provider"},
+)
+_SYNC_DISPATCH_FUSION_MAX_CALLS: Final[int] = 16
+_SYNC_DISPATCH_FUSION_MAX_AST_NODES: Final[int] = 128
+_SYNC_CACHED_FUSION_MIN_CHILDREN: Final[int] = 0
+_SYNC_CACHED_FUSION_MAX_CHILDREN: Final[int] = 8
+_SYNC_CACHED_FUSION_MAX_CHILD_DEPENDENCIES: Final[int] = 8
+_SYNC_CACHED_FUSION_MAX_AST_NODES: Final[int] = 1536
 _CLEANUP_KIND_SYNC: Final[int] = 0
 _CLEANUP_KIND_ASYNC: Final[int] = 1
 _CLEANUP_KIND_SYNC_GENERATOR: Final[int] = 2
+
+
+def _sync_materialized_provider_call_plan(
+    workflow: ProviderWorkflowPlan,
+) -> MaterializedProviderCallPlan | None:
+    call_plan = workflow.materialized_call_plan
+    if (
+        call_plan is None
+        or workflow.provider_attribute != "factory"
+        or workflow.dependencies
+        or workflow.dependency_plans
+        or workflow.sync_arguments
+        or workflow.effective_lock_mode is not LockMode.NONE
+        or workflow.uses_thread_lock
+        or workflow.uses_async_lock
+        or workflow.requires_async
+        or workflow.is_provider_async
+        or workflow.provider_is_inject_wrapper
+        or workflow.needs_cleanup
+    ):
+        return None
+    return call_plan
+
+
+def _sync_provider_value_expression(
+    *,
+    workflow: ProviderWorkflowPlan,
+    arguments: str,
+) -> str:
+    if workflow.provider_attribute == "instance":
+        return f"_provider_{workflow.slot}"
+    if _sync_materialized_provider_call_plan(workflow) is not None:
+        return f"_materialized_provider_{workflow.slot}(_materialized_argument_{workflow.slot})"
+    if arguments:
+        return f"_provider_{workflow.slot}({arguments})"
+    return f"_provider_{workflow.slot}()"
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +114,14 @@ class _ArgumentPart:
     kind: Literal["arg", "kw", "star", "starstar"]
     value: Any
     name: str | None = None
+
+
+@dataclass(slots=True)
+class _SyncTransientInlineState:
+    """Bound recursive transient expressions emitted for one generated method."""
+
+    remaining_non_leaf_nodes: int
+    active_slots: set[int]
 
 
 @dataclass(slots=True)
@@ -294,6 +353,14 @@ class ResolversAssemblyCompiler:
             generated_globals[f"_provider_{workflow.slot}"] = runtime.provider_by_slot[
                 workflow.slot
             ]
+            materialized_call_plan = _sync_materialized_provider_call_plan(workflow)
+            if materialized_call_plan is not None:
+                generated_globals[f"_materialized_provider_{workflow.slot}"] = (
+                    materialized_call_plan.provider
+                )
+                generated_globals[f"_materialized_argument_{workflow.slot}"] = (
+                    materialized_call_plan.argument
+                )
             generated_globals[f"_sync_slot_{workflow.slot}"] = _build_sync_slot_impl(
                 workflow=workflow,
             )
@@ -862,8 +929,54 @@ class ResolversAssemblyCompiler:
         equality_workflows = tuple(
             workflow for workflow in dispatch_workflows if workflow.dispatch_kind == "equality_map"
         )
-
-        body: list[ast.stmt] = []
+        fused_dispatch = (
+            self._sync_dispatch_fusion_candidate(
+                runtime=runtime,
+                class_plan=class_plan,
+                identity_workflows=identity_workflows,
+            )
+            if not is_async and enable_dispatch_cache
+            else None
+        )
+        body, identity_workflows = self._sync_cached_dispatch_prefix(
+            runtime=runtime,
+            class_plan=class_plan,
+            identity_workflows=identity_workflows,
+            enabled=not is_async and not enable_dispatch_cache,
+        )
+        if fused_dispatch is not None:
+            fused_workflow, fused_expression = fused_dispatch
+            body.append(
+                ast.If(
+                    test=ast.Compare(
+                        left=ast.Name(id="dependency", ctx=ast.Load()),
+                        ops=[ast.Is()],
+                        comparators=[
+                            ast.Name(
+                                id=f"_dep_{fused_workflow.slot}_type",
+                                ctx=ast.Load(),
+                            ),
+                        ],
+                    ),
+                    body=[
+                        ast.Assign(
+                            targets=[
+                                ast.Attribute(
+                                    value=ast.Name(id="self", ctx=ast.Load()),
+                                    attr=cache_dependency_attr_name,
+                                    ctx=ast.Store(),
+                                ),
+                            ],
+                            value=ast.Name(id="dependency", ctx=ast.Load()),
+                        ),
+                        ast.Return(value=fused_expression),
+                    ],
+                    orelse=[],
+                ),
+            )
+            identity_workflows = tuple(
+                workflow for workflow in identity_workflows if workflow.slot != fused_workflow.slot
+            )
         if enable_dispatch_cache:
             body.extend(
                 [
@@ -1133,6 +1246,319 @@ class ResolversAssemblyCompiler:
             generated_globals=generated_globals,
             is_async=is_async,
         )
+
+    def _sync_dispatch_fusion_candidate(
+        self,
+        *,
+        runtime: _ResolverRuntime,
+        class_plan: ScopePlan,
+        identity_workflows: tuple[ProviderWorkflowPlan, ...],
+    ) -> tuple[ProviderWorkflowPlan, ast.expr] | None:
+        selected: tuple[ProviderWorkflowPlan, ast.expr] | None = None
+        selected_key: tuple[int, int] | None = None
+
+        for workflow in identity_workflows:
+            expression_source = self._sync_transient_dispatch_expression(
+                runtime=runtime,
+                class_plan=class_plan,
+                workflow=workflow,
+            )
+            if expression_source is None:
+                continue
+
+            expression = ast.parse(expression_source, mode="eval").body
+            expression_nodes = tuple(ast.walk(expression))
+            call_count = sum(isinstance(node, ast.Call) for node in expression_nodes)
+            if (
+                call_count <= 1
+                or call_count > _SYNC_DISPATCH_FUSION_MAX_CALLS
+                or len(expression_nodes) > _SYNC_DISPATCH_FUSION_MAX_AST_NODES
+            ):
+                continue
+
+            candidate_key = (call_count, -workflow.slot)
+            if selected_key is None or candidate_key > selected_key:
+                selected = (workflow, expression)
+                selected_key = candidate_key
+
+        return selected
+
+    def _sync_cached_dispatch_fusion_candidate(
+        self,
+        *,
+        runtime: _ResolverRuntime,
+        class_plan: ScopePlan,
+        identity_workflows: tuple[ProviderWorkflowPlan, ...],
+    ) -> tuple[ProviderWorkflowPlan, tuple[ast.stmt, ...]] | None:
+        if class_plan.is_root or any(
+            not workflow.is_cached
+            for workflow in _dispatch_workflows(plan=runtime.plan, class_plan=class_plan)
+        ):
+            return None
+
+        selected: tuple[ProviderWorkflowPlan, tuple[ast.stmt, ...]] | None = None
+        selected_key: tuple[int, int] | None = None
+
+        for workflow in identity_workflows:
+            if not self._sync_cached_fusion_workflow_is_safe(
+                class_plan=class_plan,
+                workflow=workflow,
+            ):
+                continue
+            dependency_plans = workflow.dependency_plans
+            if (
+                not workflow.dependency_order_is_signature_order
+                or not (
+                    _SYNC_CACHED_FUSION_MIN_CHILDREN
+                    <= len(dependency_plans)
+                    <= _SYNC_CACHED_FUSION_MAX_CHILDREN
+                )
+                or any(
+                    dependency_plan.kind != "provider"
+                    or dependency_plan.dependency_slot is None
+                    or dependency_plan.dependency_slot not in runtime.workflows_by_slot
+                    or dependency_plan.dependency.parameter.kind
+                    not in {
+                        inspect.Parameter.POSITIONAL_ONLY,
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    }
+                    for dependency_plan in dependency_plans
+                )
+            ):
+                continue
+
+            child_workflows = tuple(
+                runtime.workflows_by_slot[cast("int", dependency_plan.dependency_slot)]
+                for dependency_plan in dependency_plans
+            )
+            if any(
+                child_workflow.slot == workflow.slot
+                or len(child_workflow.dependency_plans) > _SYNC_CACHED_FUSION_MAX_CHILD_DEPENDENCIES
+                or not self._sync_cached_fusion_workflow_is_safe(
+                    class_plan=class_plan,
+                    workflow=child_workflow,
+                )
+                for child_workflow in child_workflows
+            ):
+                continue
+
+            body_lines = [
+                f"cached_value = self._cache_{workflow.slot}",
+                "if cached_value is not _MISSING_CACHE:",
+                "    return cached_value",
+            ]
+            fused_arguments: list[str] = []
+            for index, child_workflow in enumerate(child_workflows):
+                dependency_name = f"_fused_dependency_{index}"
+                cached_dependency_name = f"_fused_cached_dependency_{index}"
+                child_arguments = ", ".join(
+                    argument
+                    for argument in self._optimized_sync_arguments(
+                        runtime=runtime,
+                        class_plan=class_plan,
+                        workflow=child_workflow,
+                    )
+                    if argument
+                )
+                child_provider_call = f"_provider_{child_workflow.slot}({child_arguments})"
+                body_lines.extend(
+                    [
+                        f"{dependency_name} = self._cache_{child_workflow.slot}",
+                        f"if {dependency_name} is _MISSING_CACHE:",
+                        (f"    {cached_dependency_name} = self._cache_{child_workflow.slot}"),
+                        f"    if {cached_dependency_name} is not _MISSING_CACHE:",
+                        f"        {dependency_name} = {cached_dependency_name}",
+                        "    else:",
+                        f"        {dependency_name} = {child_provider_call}",
+                        f"        self._cache_{child_workflow.slot} = {dependency_name}",
+                    ],
+                )
+                fused_arguments.append(dependency_name)
+
+            body_lines.extend(
+                [
+                    f"value = _provider_{workflow.slot}({', '.join(fused_arguments)})",
+                    f"self._cache_{workflow.slot} = value",
+                    "return value",
+                ],
+            )
+            rendered_body = "\n".join(f"    {line}" for line in body_lines)
+            module = ast.parse(f"def _cached_fusion(self):\n{rendered_body}\n")
+            function_definition = cast("ast.FunctionDef", module.body[0])
+            fused_body = tuple(function_definition.body)
+            if (
+                sum(1 for statement in fused_body for _ in ast.walk(statement))
+                > _SYNC_CACHED_FUSION_MAX_AST_NODES
+            ):
+                continue
+
+            candidate_key = (len(child_workflows), workflow.slot)
+            if selected_key is None or candidate_key > selected_key:
+                selected = (workflow, fused_body)
+                selected_key = candidate_key
+
+        return selected
+
+    def _sync_cached_dispatch_prefix(
+        self,
+        *,
+        runtime: _ResolverRuntime,
+        class_plan: ScopePlan,
+        identity_workflows: tuple[ProviderWorkflowPlan, ...],
+        enabled: bool,
+    ) -> tuple[list[ast.stmt], tuple[ProviderWorkflowPlan, ...]]:
+        if not enabled:
+            return [], identity_workflows
+        fused_dispatch = self._sync_cached_generator_dispatch_fusion_candidate(
+            runtime=runtime,
+            class_plan=class_plan,
+            identity_workflows=identity_workflows,
+        )
+        if fused_dispatch is None:
+            fused_dispatch = self._sync_cached_dispatch_fusion_candidate(
+                runtime=runtime,
+                class_plan=class_plan,
+                identity_workflows=identity_workflows,
+            )
+        if fused_dispatch is None:
+            return [], identity_workflows
+
+        fused_workflow, fused_body = fused_dispatch
+        branch = ast.If(
+            test=ast.Compare(
+                left=ast.Name(id="dependency", ctx=ast.Load()),
+                ops=[ast.Is()],
+                comparators=[
+                    ast.Name(
+                        id=f"_dep_{fused_workflow.slot}_type",
+                        ctx=ast.Load(),
+                    ),
+                ],
+            ),
+            body=list(fused_body),
+            orelse=[],
+        )
+        remaining_workflows = tuple(
+            workflow for workflow in identity_workflows if workflow.slot != fused_workflow.slot
+        )
+        return [branch], remaining_workflows
+
+    def _sync_cached_generator_dispatch_fusion_candidate(
+        self,
+        *,
+        runtime: _ResolverRuntime,
+        class_plan: ScopePlan,
+        identity_workflows: tuple[ProviderWorkflowPlan, ...],
+    ) -> tuple[ProviderWorkflowPlan, tuple[ast.stmt, ...]] | None:
+        dispatch_workflows = _dispatch_workflows(plan=runtime.plan, class_plan=class_plan)
+        if class_plan.is_root or len(dispatch_workflows) != 1 or len(identity_workflows) != 1:
+            return None
+
+        workflow = identity_workflows[0]
+        if (
+            dispatch_workflows[0] is not workflow
+            or workflow.scope_level != class_plan.scope_level
+            or workflow.cache_owner_scope_level != class_plan.scope_level
+            or workflow.max_required_scope_level > class_plan.scope_level
+            or not workflow.is_cached
+            or workflow.is_transient
+            or workflow.lock_mode is not LockMode.NONE
+            or workflow.effective_lock_mode is not LockMode.NONE
+            or workflow.uses_thread_lock
+            or workflow.uses_async_lock
+            or workflow.requires_async
+            or workflow.is_provider_async
+            or workflow.provider_attribute != "generator"
+            or workflow.provider_is_inject_wrapper
+            or not workflow.needs_cleanup
+            or not runtime.has_cleanup
+            or workflow.dependencies
+            or workflow.dependency_plans
+            or workflow.sync_arguments
+        ):
+            return None
+
+        body_lines = [
+            f"cached_value = self._cache_{workflow.slot}",
+            "if cached_value is not _MISSING_CACHE:",
+            "    return cached_value",
+        ]
+        generator_lines = self._specialized_sync_generator_body_lines(
+            runtime=runtime,
+            workflow=workflow,
+            arguments="",
+        )
+        body_lines.extend(generator_lines)
+        rendered_body = "\n".join(f"    {line}" for line in body_lines)
+        module = ast.parse(f"def _cached_generator_fusion(self):\n{rendered_body}\n")
+        function_definition = cast("ast.FunctionDef", module.body[0])
+        return workflow, tuple(function_definition.body)
+
+    def _sync_cached_fusion_workflow_is_safe(
+        self,
+        *,
+        class_plan: ScopePlan,
+        workflow: ProviderWorkflowPlan,
+    ) -> bool:
+        if (
+            workflow.scope_level != class_plan.scope_level
+            or workflow.cache_owner_scope_level != class_plan.scope_level
+            or workflow.max_required_scope_level > class_plan.scope_level
+            or not workflow.is_cached
+            or workflow.is_transient
+            or workflow.effective_lock_mode is not LockMode.NONE
+            or workflow.uses_thread_lock
+            or workflow.uses_async_lock
+            or workflow.requires_async
+            or workflow.is_provider_async
+            or workflow.provider_attribute not in {"concrete_type", "factory"}
+            or workflow.provider_is_inject_wrapper
+            or workflow.needs_cleanup
+            or workflow.dispatch_kind != "identity"
+        ):
+            return False
+
+        dependency_plans = workflow.dependency_plans
+        dependencies = workflow.dependencies
+        if len(dependency_plans) != len(dependencies):
+            return False
+        return not any(
+            dependency_plan.dependency != dependency
+            or dependency_plan.dependency.parameter.kind
+            in {inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD}
+            or dependency_plan.dependency_requires_async
+            for dependency_plan, dependency in zip(
+                dependency_plans,
+                dependencies,
+                strict=True,
+            )
+        )
+
+    def _sync_transient_dispatch_expression(
+        self,
+        *,
+        runtime: _ResolverRuntime,
+        class_plan: ScopePlan,
+        workflow: ProviderWorkflowPlan,
+    ) -> str | None:
+        if not self._sync_transient_workflow_can_inline(
+            class_plan=class_plan,
+            workflow=workflow,
+        ):
+            return None
+
+        optimized_arguments = self._optimized_sync_arguments(
+            runtime=runtime,
+            class_plan=class_plan,
+            workflow=workflow,
+            inline_state=_SyncTransientInlineState(
+                remaining_non_leaf_nodes=_SYNC_TRANSIENT_INLINE_MAX_NON_LEAF_NODES,
+                active_slots={workflow.slot},
+            ),
+        )
+        arguments = ", ".join(argument for argument in optimized_arguments if argument)
+        provider_expression = f"_provider_{workflow.slot}"
+        return f"{provider_expression}({arguments})" if arguments else f"{provider_expression}()"
 
     def _compile_exit_method(
         self,
@@ -1467,63 +1893,22 @@ class ResolversAssemblyCompiler:
             )
 
         arguments = ""
-        value_expression: str
-        if workflow.provider_attribute == "instance":
-            value_expression = f"_provider_{workflow.slot}"
-        else:
+        if workflow.provider_attribute != "instance":
             optimized_arguments = self._optimized_sync_arguments(
                 runtime=runtime,
                 class_plan=class_plan,
                 workflow=workflow,
             )
             arguments = ", ".join(argument for argument in optimized_arguments if argument)
-            value_expression = (
-                f"_provider_{workflow.slot}({arguments})"
-                if arguments
-                else f"_provider_{workflow.slot}()"
-            )
-
         if workflow.provider_attribute == "generator":
             if workflow.is_provider_async:
                 return None
-            if runtime.has_cleanup:
-                provider_gen_expression = (
-                    f"_provider_{workflow.slot}({arguments})"
-                    if arguments
-                    else f"_provider_{workflow.slot}()"
-                )
-                lines.extend(
-                    [
-                        "if self._cleanup_enabled:",
-                        f"    provider_gen = {provider_gen_expression}",
-                        "    try:",
-                        "        value = next(provider_gen)",
-                        "    except StopIteration as error:",
-                        '        msg = "generator didn\'t yield"',
-                        "        raise RuntimeError(msg) from error",
-                        "    if self._cleanup_callback_single is None and not self._cleanup_callbacks:",
-                        "        self._cleanup_callback_single = provider_gen",
-                        "    else:",
-                        "        self._cleanup_callbacks.append((2, provider_gen))",
-                        "else:",
-                        f"    provider_gen = {value_expression}",
-                        "    value = next(provider_gen)",
-                    ],
-                )
-            else:
-                lines.extend(
-                    [
-                        f"provider_gen = {value_expression}",
-                        "value = next(provider_gen)",
-                    ],
-                )
-
-            if workflow.is_cached:
-                lines.append(f"self._cache_{workflow.slot} = value")
-                if workflow.cache_owner_scope_level == runtime.root_scope_level:
-                    lines.append(f"self.resolve_{workflow.slot} = lambda: value")
-
-            lines.append("return value")
+            generator_lines = self._specialized_sync_generator_body_lines(
+                runtime=runtime,
+                workflow=workflow,
+                arguments=arguments,
+            )
+            lines.extend(generator_lines)
             return _compile_function_from_source(
                 name=method_name,
                 arg_names=("self",),
@@ -1534,6 +1919,10 @@ class ResolversAssemblyCompiler:
         if workflow.provider_attribute not in {"instance", "concrete_type", "factory"}:
             return None
 
+        value_expression = _sync_provider_value_expression(
+            workflow=workflow,
+            arguments=arguments,
+        )
         lines.append(f"value = {value_expression}")
 
         if workflow.is_provider_async:
@@ -1558,16 +1947,76 @@ class ResolversAssemblyCompiler:
             generated_globals=generated_globals,
         )
 
+    def _specialized_sync_generator_body_lines(
+        self,
+        *,
+        runtime: _ResolverRuntime,
+        workflow: ProviderWorkflowPlan,
+        arguments: str,
+    ) -> list[str]:
+        value_expression = _sync_provider_value_expression(
+            workflow=workflow,
+            arguments=arguments,
+        )
+        lines: list[str] = []
+        if runtime.has_cleanup:
+            provider_gen_expression = (
+                f"_provider_{workflow.slot}({arguments})"
+                if arguments
+                else f"_provider_{workflow.slot}()"
+            )
+            lines.extend(
+                [
+                    "if self._cleanup_enabled:",
+                    f"    provider_gen = {provider_gen_expression}",
+                    "    try:",
+                    "        value = next(provider_gen)",
+                    "    except StopIteration as error:",
+                    '        msg = "generator didn\'t yield"',
+                    "        raise RuntimeError(msg) from error",
+                    "    if self._cleanup_callback_single is None and not self._cleanup_callbacks:",
+                    "        self._cleanup_callback_single = provider_gen",
+                    "    else:",
+                    "        self._cleanup_callbacks.append((2, provider_gen))",
+                    "else:",
+                    f"    provider_gen = {value_expression}",
+                    "    value = next(provider_gen)",
+                ],
+            )
+        else:
+            lines.extend(
+                [
+                    f"provider_gen = {value_expression}",
+                    "value = next(provider_gen)",
+                ],
+            )
+
+        if workflow.is_cached:
+            lines.append(f"self._cache_{workflow.slot} = value")
+            if workflow.cache_owner_scope_level == runtime.root_scope_level:
+                lines.append(f"self.resolve_{workflow.slot} = lambda: value")
+
+        lines.append("return value")
+        return lines
+
     def _optimized_sync_arguments(
         self,
         *,
         runtime: _ResolverRuntime,
         class_plan: ScopePlan,
         workflow: ProviderWorkflowPlan,
+        inline_state: _SyncTransientInlineState | None = None,
+        inline_depth: int = 0,
     ) -> tuple[str, ...]:
         dependency_plans = workflow.dependency_plans
         if not dependency_plans:
             return ()
+
+        if inline_state is None:
+            inline_state = _SyncTransientInlineState(
+                remaining_non_leaf_nodes=_SYNC_TRANSIENT_INLINE_MAX_NON_LEAF_NODES,
+                active_slots={workflow.slot},
+            )
 
         resolver_expression = (
             "self" if class_plan.scope_level == runtime.root_scope_level else "self._root_resolver"
@@ -1588,6 +2037,8 @@ class ResolversAssemblyCompiler:
                 class_plan=class_plan,
                 dependency_plan=dependency_plan,
                 resolver_expression=resolver_expression,
+                inline_state=inline_state,
+                inline_depth=inline_depth,
             )
             if expression is _FALLBACK_ARGUMENT_EXPRESSION:
                 return workflow.sync_arguments
@@ -1633,6 +2084,88 @@ class ResolversAssemblyCompiler:
 
         return tuple(optimized_arguments)
 
+    def _inlined_sync_transient_dependency_expression(
+        self,
+        *,
+        runtime: _ResolverRuntime,
+        class_plan: ScopePlan,
+        workflow: ProviderWorkflowPlan,
+        inline_state: _SyncTransientInlineState,
+        inline_depth: int,
+    ) -> str | None:
+        if not self._sync_transient_workflow_can_inline(
+            class_plan=class_plan,
+            workflow=workflow,
+        ):
+            return None
+
+        dependency_plans = workflow.dependency_plans
+        if not dependency_plans:
+            return f"_provider_{workflow.slot}()"
+        if (
+            inline_depth >= _SYNC_TRANSIENT_INLINE_MAX_DEPTH
+            or inline_state.remaining_non_leaf_nodes == 0
+            or workflow.slot in inline_state.active_slots
+        ):
+            return None
+
+        inline_state.remaining_non_leaf_nodes -= 1
+        inline_state.active_slots.add(workflow.slot)
+        try:
+            optimized_arguments = self._optimized_sync_arguments(
+                runtime=runtime,
+                class_plan=class_plan,
+                workflow=workflow,
+                inline_state=inline_state,
+                inline_depth=inline_depth + 1,
+            )
+        finally:
+            inline_state.active_slots.remove(workflow.slot)
+
+        arguments = ", ".join(argument for argument in optimized_arguments if argument)
+        provider_expression = f"_provider_{workflow.slot}"
+        return f"{provider_expression}({arguments})" if arguments else f"{provider_expression}()"
+
+    def _sync_transient_workflow_can_inline(
+        self,
+        *,
+        class_plan: ScopePlan,
+        workflow: ProviderWorkflowPlan,
+    ) -> bool:
+        if (
+            workflow.scope_level != class_plan.scope_level
+            or workflow.max_required_scope_level > class_plan.scope_level
+            or not workflow.is_transient
+            or workflow.is_cached
+            or workflow.cache_owner_scope_level is not None
+            or workflow.requires_async
+            or workflow.is_provider_async
+            or workflow.provider_attribute not in {"concrete_type", "factory"}
+            or workflow.provider_is_inject_wrapper
+            or workflow.needs_cleanup
+            or workflow.uses_thread_lock
+            or workflow.uses_async_lock
+        ):
+            return False
+
+        dependency_plans = workflow.dependency_plans
+        dependencies = workflow.dependencies
+        if len(dependency_plans) != len(dependencies):
+            return False
+        return not any(
+            dependency_plan.dependency != dependency
+            or dependency_plan.kind not in _SYNC_TRANSIENT_INLINE_DEPENDENCY_KINDS
+            or dependency_plan.dependency.parameter.kind
+            in {inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD}
+            or (dependency_plan.kind == "provider" and dependency_plan.dependency_slot is None)
+            or (dependency_plan.kind == "literal" and dependency_plan.literal_expression is None)
+            for dependency_plan, dependency in zip(
+                dependency_plans,
+                dependencies,
+                strict=True,
+            )
+        )
+
     def _optimized_sync_dependency_expression(
         self,
         *,
@@ -1640,6 +2173,8 @@ class ResolversAssemblyCompiler:
         class_plan: ScopePlan,
         dependency_plan: ProviderDependencyPlan,
         resolver_expression: str,
+        inline_state: _SyncTransientInlineState | None = None,
+        inline_depth: int = 0,
     ) -> str | None | object:
         if dependency_plan.kind == "omit":
             return None
@@ -1677,25 +2212,38 @@ class ResolversAssemblyCompiler:
                 owner_scope = runtime.scopes_by_level[dependency_workflow.scope_level]
                 expression = f"self.{owner_scope.resolver_attr_name}.resolve_{dependency_slot}()"
 
-        if (
-            dependency_workflow.scope_level == class_plan.scope_level
-            and not dependency_workflow.is_cached
-            and not dependency_workflow.requires_async
-            and dependency_workflow.provider_attribute in {"concrete_type", "factory"}
-            and not dependency_workflow.provider_is_inject_wrapper
-            and not dependency_workflow.dependencies
-            and not dependency_workflow.dependency_plans
-        ):
-            expression = f"_provider_{dependency_slot}()"
+        if inline_state is None:
+            inline_state = _SyncTransientInlineState(
+                remaining_non_leaf_nodes=_SYNC_TRANSIENT_INLINE_MAX_NON_LEAF_NODES,
+                active_slots=set(),
+            )
+        inlined_expression = self._inlined_sync_transient_dependency_expression(
+            runtime=runtime,
+            class_plan=class_plan,
+            workflow=dependency_workflow,
+            inline_state=inline_state,
+            inline_depth=inline_depth,
+        )
+        if inlined_expression is not None:
+            expression = inlined_expression
 
-        if (
-            dependency_workflow.is_cached
-            and dependency_workflow.cache_owner_scope_level == runtime.root_scope_level
-        ):
+        cache_owner_scope_level = dependency_workflow.cache_owner_scope_level
+        if dependency_workflow.is_cached and cache_owner_scope_level == runtime.root_scope_level:
             expression = (
                 f"({resolver_expression}._cache_{dependency_slot} if "
                 f"{resolver_expression}._cache_{dependency_slot} is not _MISSING_CACHE else "
                 f"{resolver_expression}.resolve_{dependency_slot}())"
+            )
+        elif (
+            dependency_workflow.is_cached
+            and cache_owner_scope_level == class_plan.scope_level
+            and not dependency_workflow.requires_async
+        ):
+            cached_local = f"_cached_dependency_{dependency_slot}"
+            expression = (
+                f"({cached_local} if "
+                f"({cached_local} := self._cache_{dependency_slot}) "
+                f"is not _MISSING_CACHE else self.resolve_{dependency_slot}())"
             )
         return expression
 
@@ -3484,7 +4032,10 @@ def _dispatch_cache_enabled_for_class(
     plan: ResolverGenerationPlan,
     class_plan: ScopePlan,
 ) -> bool:
-    workflow_count = len(_dispatch_workflows(plan=plan, class_plan=class_plan))
+    workflows = _dispatch_workflows(plan=plan, class_plan=class_plan)
+    if not any(not workflow.is_cached for workflow in workflows):
+        return False
+    workflow_count = len(workflows)
     return workflow_count >= _DISPATCH_CACHE_WORKFLOW_THRESHOLD or (
         not class_plan.is_root and workflow_count == 1
     )

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ast
 import asyncio
+import dis
 import inspect
 import threading
 from contextlib import asynccontextmanager
@@ -12,7 +14,7 @@ import pytest
 
 from diwire import All, AsyncProvider, Container, Lifetime, Maybe, Provider, Scope
 from diwire._internal.lock_mode import LockMode
-from diwire._internal.providers import ProviderDependency
+from diwire._internal.providers import MaterializedProviderCallPlan, ProviderDependency
 from diwire._internal.resolvers.assembly import compiler as compiler_module
 from diwire._internal.resolvers.assembly.planner import (
     ProviderDependencyPlan,
@@ -225,6 +227,88 @@ def _runtime(
         },
         cache_slots_by_owner_level=cache_slots_by_owner_level,
         next_scope_options_by_level=next_scope_options_by_level,
+    )
+
+
+def _eligible_materialized_workflow() -> tuple[
+    ProviderWorkflowPlan,
+    MaterializedProviderCallPlan,
+]:
+    call_plan = MaterializedProviderCallPlan(
+        provider=lambda argument: argument,
+        argument=int,
+    )
+    workflow = replace(
+        _workflow_plan(
+            slot=1,
+            provider_attribute="factory",
+            is_cached=False,
+            cache_owner_scope_level=None,
+        ),
+        lock_mode=LockMode.NONE,
+        effective_lock_mode=LockMode.NONE,
+        needs_cleanup=False,
+        materialized_call_plan=call_plan,
+    )
+    return workflow, call_plan
+
+
+def test_sync_materialized_provider_call_plan_accepts_exact_safe_shape() -> None:
+    workflow, call_plan = _eligible_materialized_workflow()
+
+    assert compiler_module._sync_materialized_provider_call_plan(workflow) is call_plan
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        {"materialized_call_plan": None},
+        {"provider_attribute": "concrete_type"},
+        {"dependencies": (_dependency(),)},
+        {
+            "dependency_plans": (
+                ProviderDependencyPlan(
+                    kind="literal",
+                    dependency=_dependency(),
+                    dependency_index=0,
+                    literal_expression="1",
+                ),
+            ),
+        },
+        {"sync_arguments": ("1",)},
+        {"effective_lock_mode": LockMode.THREAD},
+        {"uses_thread_lock": True},
+        {"uses_async_lock": True},
+        {"requires_async": True},
+        {"is_provider_async": True},
+        {"provider_is_inject_wrapper": True},
+        {"needs_cleanup": True},
+    ],
+    ids=(
+        "missing-plan",
+        "non-factory",
+        "dependencies",
+        "dependency-plans",
+        "sync-arguments",
+        "lock-mode",
+        "thread-lock",
+        "async-lock",
+        "requires-async",
+        "async-provider",
+        "inject-wrapper",
+        "cleanup",
+    ),
+)
+def test_sync_materialized_provider_call_plan_rejects_unsafe_workflow(
+    replacement: dict[str, Any],
+) -> None:
+    workflow, _ = _eligible_materialized_workflow()
+
+    assert (
+        compiler_module._sync_materialized_provider_call_plan(
+            replace(workflow, **replacement),
+        )
+        is None
     )
 
 
@@ -1640,9 +1724,37 @@ def test_optimized_sync_dependency_expression_additional_branches() -> None:
         is_cached=False,
         max_required_scope_level=3,
     )
+    workflow_root_cached = _workflow_plan(
+        slot=3,
+        scope_level=1,
+        is_cached=True,
+        cache_owner_scope_level=1,
+        max_required_scope_level=1,
+    )
+    workflow_request_cached = _workflow_plan(
+        slot=4,
+        scope_level=3,
+        is_cached=True,
+        cache_owner_scope_level=3,
+        max_required_scope_level=3,
+    )
+    workflow_request_async_cached = _workflow_plan(
+        slot=5,
+        scope_level=3,
+        is_cached=True,
+        cache_owner_scope_level=3,
+        requires_async=True,
+        max_required_scope_level=3,
+    )
     runtime = _runtime(
         scopes=(root_scope, request_scope, action_scope),
-        workflows=(workflow_root, workflow_request),
+        workflows=(
+            workflow_root,
+            workflow_request,
+            workflow_root_cached,
+            workflow_request_cached,
+            workflow_request_async_cached,
+        ),
     )
 
     dependency = _dependency()
@@ -1785,6 +1897,1498 @@ def test_optimized_sync_dependency_expression_additional_branches() -> None:
         )
         == "_provider_1()"
     )
+    assert (
+        compiler._optimized_sync_dependency_expression(
+            runtime=runtime,
+            class_plan=action_scope,
+            dependency_plan=ProviderDependencyPlan(
+                kind="provider",
+                dependency=dependency,
+                dependency_index=0,
+                dependency_slot=3,
+            ),
+            resolver_expression="self._root_resolver",
+        )
+        == "(self._root_resolver._cache_3 if self._root_resolver._cache_3 "
+        "is not _MISSING_CACHE else self._root_resolver.resolve_3())"
+    )
+    assert (
+        compiler._optimized_sync_dependency_expression(
+            runtime=runtime,
+            class_plan=request_scope,
+            dependency_plan=ProviderDependencyPlan(
+                kind="provider",
+                dependency=dependency,
+                dependency_index=0,
+                dependency_slot=4,
+            ),
+            resolver_expression="self._root_resolver",
+        )
+        == "(_cached_dependency_4 if (_cached_dependency_4 := self._cache_4) "
+        "is not _MISSING_CACHE else self.resolve_4())"
+    )
+    assert (
+        compiler._optimized_sync_dependency_expression(
+            runtime=runtime,
+            class_plan=action_scope,
+            dependency_plan=ProviderDependencyPlan(
+                kind="provider",
+                dependency=dependency,
+                dependency_index=0,
+                dependency_slot=4,
+            ),
+            resolver_expression="self._root_resolver",
+        )
+        == "self._request_resolver.resolve_4()"
+    )
+    assert (
+        compiler._optimized_sync_dependency_expression(
+            runtime=runtime,
+            class_plan=request_scope,
+            dependency_plan=ProviderDependencyPlan(
+                kind="provider",
+                dependency=dependency,
+                dependency_index=0,
+                dependency_slot=5,
+                dependency_requires_async=True,
+            ),
+            resolver_expression="self._root_resolver",
+        )
+        == "self.resolve_5()"
+    )
+
+
+def test_optimized_sync_dependency_expression_recursively_inlines_safe_transients() -> None:
+    compiler = compiler_module.ResolversAssemblyCompiler()
+    request_scope = _scope_plan(level=Scope.REQUEST.level, name="request")
+    leaf_workflow = _workflow_plan(
+        slot=90,
+        scope_level=Scope.REQUEST.level,
+        is_cached=False,
+        cache_owner_scope_level=None,
+        provider_attribute="concrete_type",
+    )
+    middle_dependency = _dependency(provides=leaf_workflow.provides, name="leaf")
+    middle_workflow = _workflow_plan(
+        slot=91,
+        scope_level=Scope.REQUEST.level,
+        is_cached=False,
+        cache_owner_scope_level=None,
+        provider_attribute="factory",
+        dependencies=(middle_dependency,),
+        dependency_slots=(leaf_workflow.slot,),
+        dependency_requires_async=(False,),
+        dependency_plans=(
+            ProviderDependencyPlan(
+                kind="provider",
+                dependency=middle_dependency,
+                dependency_index=0,
+                dependency_slot=leaf_workflow.slot,
+            ),
+        ),
+    )
+    outer_dependency = _dependency(provides=middle_workflow.provides, name="middle")
+    outer_workflow = _workflow_plan(
+        slot=92,
+        scope_level=Scope.REQUEST.level,
+        is_cached=False,
+        cache_owner_scope_level=None,
+        provider_attribute="concrete_type",
+        dependencies=(outer_dependency,),
+        dependency_slots=(middle_workflow.slot,),
+        dependency_requires_async=(False,),
+        dependency_plans=(
+            ProviderDependencyPlan(
+                kind="provider",
+                dependency=outer_dependency,
+                dependency_index=0,
+                dependency_slot=middle_workflow.slot,
+            ),
+        ),
+    )
+    runtime = _runtime(
+        scopes=(_scope_plan(level=Scope.APP.level, name="app"), request_scope),
+        workflows=(leaf_workflow, middle_workflow, outer_workflow),
+    )
+    dependency = _dependency(provides=outer_workflow.provides, name="outer")
+
+    assert (
+        compiler._optimized_sync_dependency_expression(
+            runtime=runtime,
+            class_plan=request_scope,
+            dependency_plan=ProviderDependencyPlan(
+                kind="provider",
+                dependency=dependency,
+                dependency_index=0,
+                dependency_slot=outer_workflow.slot,
+            ),
+            resolver_expression="self._root_resolver",
+        )
+        == "_provider_92(_provider_91(_provider_90()))"
+    )
+    bounded_plan = ProviderDependencyPlan(
+        kind="provider",
+        dependency=dependency,
+        dependency_index=0,
+        dependency_slot=outer_workflow.slot,
+    )
+    assert (
+        compiler._optimized_sync_dependency_expression(
+            runtime=runtime,
+            class_plan=request_scope,
+            dependency_plan=bounded_plan,
+            resolver_expression="self._root_resolver",
+            inline_state=compiler_module._SyncTransientInlineState(
+                remaining_non_leaf_nodes=1,
+                active_slots=set(),
+            ),
+        )
+        == "_provider_92(self.resolve_91())"
+    )
+    assert (
+        compiler._optimized_sync_dependency_expression(
+            runtime=runtime,
+            class_plan=request_scope,
+            dependency_plan=bounded_plan,
+            resolver_expression="self._root_resolver",
+            inline_state=compiler_module._SyncTransientInlineState(
+                remaining_non_leaf_nodes=8,
+                active_slots={outer_workflow.slot},
+            ),
+        )
+        == "self.resolve_92()"
+    )
+    assert (
+        compiler._optimized_sync_dependency_expression(
+            runtime=runtime,
+            class_plan=request_scope,
+            dependency_plan=bounded_plan,
+            resolver_expression="self._root_resolver",
+            inline_state=compiler_module._SyncTransientInlineState(
+                remaining_non_leaf_nodes=8,
+                active_slots=set(),
+            ),
+            inline_depth=compiler_module._SYNC_TRANSIENT_INLINE_MAX_DEPTH,
+        )
+        == "self.resolve_92()"
+    )
+
+
+def test_sync_dispatch_fusion_selects_largest_graph_before_cache_deterministically() -> None:
+    class _Leaf:
+        pass
+
+    class _Middle:
+        pass
+
+    class _SelectedRoot:
+        pass
+
+    class _SmallRoot:
+        pass
+
+    class _TiedRoot:
+        pass
+
+    request_scope = _scope_plan(level=Scope.REQUEST.level, name="request")
+    leaf_workflow = _workflow_plan(
+        slot=90,
+        provides=_Leaf,
+        scope_level=Scope.REQUEST.level,
+        is_cached=False,
+        cache_owner_scope_level=None,
+        provider_attribute="factory",
+    )
+    middle_dependency = _dependency(provides=_Leaf, name="leaf")
+    middle_workflow = _workflow_plan(
+        slot=91,
+        provides=_Middle,
+        scope_level=Scope.REQUEST.level,
+        is_cached=False,
+        cache_owner_scope_level=None,
+        provider_attribute="factory",
+        dependencies=(middle_dependency,),
+        dependency_slots=(leaf_workflow.slot,),
+        dependency_requires_async=(False,),
+        dependency_plans=(
+            ProviderDependencyPlan(
+                kind="provider",
+                dependency=middle_dependency,
+                dependency_index=0,
+                dependency_slot=leaf_workflow.slot,
+            ),
+        ),
+    )
+    selected_dependency = _dependency(provides=_Middle, name="middle")
+    selected_workflow = _workflow_plan(
+        slot=92,
+        provides=_SelectedRoot,
+        scope_level=Scope.REQUEST.level,
+        is_cached=False,
+        cache_owner_scope_level=None,
+        provider_attribute="factory",
+        dependencies=(selected_dependency,),
+        dependency_slots=(middle_workflow.slot,),
+        dependency_requires_async=(False,),
+        dependency_plans=(
+            ProviderDependencyPlan(
+                kind="provider",
+                dependency=selected_dependency,
+                dependency_index=0,
+                dependency_slot=middle_workflow.slot,
+            ),
+        ),
+    )
+    small_dependency = _dependency(provides=_Leaf, name="leaf")
+    small_workflow = _workflow_plan(
+        slot=94,
+        provides=_SmallRoot,
+        scope_level=Scope.REQUEST.level,
+        is_cached=False,
+        cache_owner_scope_level=None,
+        provider_attribute="factory",
+        dependencies=(small_dependency,),
+        dependency_slots=(leaf_workflow.slot,),
+        dependency_requires_async=(False,),
+        dependency_plans=(
+            ProviderDependencyPlan(
+                kind="provider",
+                dependency=small_dependency,
+                dependency_index=0,
+                dependency_slot=leaf_workflow.slot,
+            ),
+        ),
+    )
+    tied_dependency = _dependency(provides=_Middle, name="middle")
+    tied_workflow = _workflow_plan(
+        slot=95,
+        provides=_TiedRoot,
+        scope_level=Scope.REQUEST.level,
+        is_cached=False,
+        cache_owner_scope_level=None,
+        provider_attribute="factory",
+        dependencies=(tied_dependency,),
+        dependency_slots=(middle_workflow.slot,),
+        dependency_requires_async=(False,),
+        dependency_plans=(
+            ProviderDependencyPlan(
+                kind="provider",
+                dependency=tied_dependency,
+                dependency_index=0,
+                dependency_slot=middle_workflow.slot,
+            ),
+        ),
+    )
+    workflows = (
+        tied_workflow,
+        small_workflow,
+        selected_workflow,
+        middle_workflow,
+        leaf_workflow,
+    )
+    runtime = _runtime(
+        scopes=(_scope_plan(level=Scope.APP.level, name="app"), request_scope),
+        workflows=workflows,
+    )
+    compiler = compiler_module.ResolversAssemblyCompiler()
+    generated_globals = compiler._build_generated_globals(runtime=runtime)
+
+    sync_dispatch = compiler._compile_dispatch_method(
+        runtime=runtime,
+        class_plan=request_scope,
+        generated_globals=generated_globals,
+        is_async=False,
+    )
+    async_dispatch = compiler._compile_dispatch_method(
+        runtime=runtime,
+        class_plan=request_scope,
+        generated_globals=generated_globals,
+        is_async=True,
+    )
+
+    sync_names = sync_dispatch.__code__.co_names
+    assert "_provider_92" in sync_names
+    assert "_provider_91" in sync_names
+    assert "_provider_90" in sync_names
+    assert "resolve_92" not in sync_names
+    assert "_provider_94" not in sync_names
+    assert "_provider_95" not in sync_names
+    assert "resolve_94" in sync_names
+    assert "resolve_95" in sync_names
+    sync_instructions = tuple(dis.get_instructions(sync_dispatch))
+    selected_dependency_loads = [
+        index
+        for index, instruction in enumerate(sync_instructions)
+        if instruction.argval == "_dep_92_type"
+    ]
+    cache_load = next(
+        index
+        for index, instruction in enumerate(sync_instructions)
+        if instruction.argval == "_last_sync_dependency"
+    )
+    assert len(selected_dependency_loads) == 1
+    assert selected_dependency_loads[0] < cache_load
+    assert "_provider_92" not in async_dispatch.__code__.co_names
+    assert "aresolve_92" in async_dispatch.__code__.co_names
+
+    ordered_runtime = _runtime(
+        scopes=(_scope_plan(level=Scope.APP.level, name="app"), request_scope),
+        workflows=tuple(reversed(workflows)),
+    )
+    ordered_dispatch = compiler._compile_dispatch_method(
+        runtime=ordered_runtime,
+        class_plan=request_scope,
+        generated_globals=compiler._build_generated_globals(runtime=ordered_runtime),
+        is_async=False,
+    )
+    assert "_provider_92" in ordered_dispatch.__code__.co_names
+    assert "resolve_92" not in ordered_dispatch.__code__.co_names
+    assert "_provider_95" not in ordered_dispatch.__code__.co_names
+
+
+@pytest.mark.parametrize(
+    ("replacement", "dependency_kind"),
+    [
+        (
+            {
+                "is_cached": True,
+                "is_transient": False,
+                "cache_owner_scope_level": Scope.REQUEST.level,
+            },
+            None,
+        ),
+        ({"requires_async": True, "is_provider_async": True}, None),
+        ({"provider_is_inject_wrapper": True}, None),
+        ({"needs_cleanup": True}, None),
+        ({"scope_level": Scope.APP.level, "scope_name": "app"}, None),
+        ({"max_required_scope_level": Scope.ACTION.level}, None),
+        ({"uses_thread_lock": True}, None),
+        ({"uses_async_lock": True}, None),
+        ({"dispatch_kind": "equality_map"}, None),
+        ({"dependency_plans": ()}, None),
+        ({}, "all"),
+        ({}, "variadic"),
+    ],
+    ids=(
+        "cached",
+        "async",
+        "inject-wrapper",
+        "cleanup",
+        "other-scope",
+        "deeper-scope",
+        "thread-lock",
+        "async-lock",
+        "equality-dispatch",
+        "incomplete-plan",
+        "all-dependency",
+        "variadic",
+    ),
+)
+def test_sync_dispatch_fusion_keeps_unsafe_top_level_workflows(
+    replacement: dict[str, Any],
+    dependency_kind: str | None,
+) -> None:
+    class _Leaf:
+        pass
+
+    class _UnsafeRoot:
+        pass
+
+    request_scope = _scope_plan(level=Scope.REQUEST.level, name="request")
+    leaf_workflow = _workflow_plan(
+        slot=90,
+        provides=_Leaf,
+        scope_level=Scope.REQUEST.level,
+        is_cached=False,
+        cache_owner_scope_level=None,
+        provider_attribute="factory",
+    )
+    dependency = _dependency(provides=_Leaf, name="leaf")
+    unsafe_workflow = _workflow_plan(
+        slot=93,
+        provides=_UnsafeRoot,
+        scope_level=Scope.REQUEST.level,
+        is_cached=False,
+        cache_owner_scope_level=None,
+        provider_attribute="factory",
+        dependencies=(dependency,),
+        dependency_slots=(leaf_workflow.slot,),
+        dependency_requires_async=(False,),
+        dependency_plans=(
+            ProviderDependencyPlan(
+                kind="provider",
+                dependency=dependency,
+                dependency_index=0,
+                dependency_slot=leaf_workflow.slot,
+            ),
+        ),
+    )
+    if dependency_kind == "all":
+        unsafe_workflow = replace(
+            unsafe_workflow,
+            dependency_plans=(
+                ProviderDependencyPlan(
+                    kind="all",
+                    dependency=dependency,
+                    dependency_index=0,
+                    all_slots=(leaf_workflow.slot,),
+                ),
+            ),
+        )
+    elif dependency_kind == "variadic":
+        variadic_dependency = _dependency(
+            provides=_Leaf,
+            name="leaves",
+            kind=inspect.Parameter.VAR_POSITIONAL,
+        )
+        unsafe_workflow = replace(
+            unsafe_workflow,
+            dependencies=(variadic_dependency,),
+            dependency_plans=(
+                ProviderDependencyPlan(
+                    kind="provider",
+                    dependency=variadic_dependency,
+                    dependency_index=0,
+                    dependency_slot=leaf_workflow.slot,
+                ),
+            ),
+        )
+    else:
+        unsafe_workflow = replace(unsafe_workflow, **replacement)
+
+    filler_one = _workflow_plan(
+        slot=91,
+        provides=str,
+        scope_level=Scope.REQUEST.level,
+        is_cached=False,
+        cache_owner_scope_level=None,
+        provider_attribute="factory",
+    )
+    filler_two = _workflow_plan(
+        slot=92,
+        provides=bytes,
+        scope_level=Scope.REQUEST.level,
+        is_cached=False,
+        cache_owner_scope_level=None,
+        provider_attribute="factory",
+    )
+    runtime = _runtime(
+        scopes=(_scope_plan(level=Scope.APP.level, name="app"), request_scope),
+        workflows=(leaf_workflow, filler_one, filler_two, unsafe_workflow),
+    )
+    compiler = compiler_module.ResolversAssemblyCompiler()
+    dispatch = compiler._compile_dispatch_method(
+        runtime=runtime,
+        class_plan=request_scope,
+        generated_globals=compiler._build_generated_globals(runtime=runtime),
+        is_async=False,
+    )
+
+    assert "_provider_93" not in dispatch.__code__.co_names
+    assert "resolve_93" in dispatch.__code__.co_names
+
+
+@pytest.mark.parametrize("bound_kind", ["dispatch-cache", "call-count", "ast-nodes"])
+def test_sync_dispatch_fusion_respects_dispatch_and_expression_bounds(
+    bound_kind: str,
+) -> None:
+    class _Leaf:
+        pass
+
+    class _BoundedRoot:
+        pass
+
+    request_scope = _scope_plan(level=Scope.REQUEST.level, name="request")
+    leaf_workflows: list[ProviderWorkflowPlan] = []
+    dependencies: list[ProviderDependency] = []
+    dependency_plans: list[ProviderDependencyPlan] = []
+    if bound_kind == "call-count":
+        leaf_count = compiler_module._SYNC_DISPATCH_FUSION_MAX_CALLS
+    else:
+        leaf_count = 1
+    for index in range(leaf_count):
+        slot = 90 + index
+        leaf_workflow = _workflow_plan(
+            slot=slot,
+            provides=type(f"_Leaf{index}", (), {}),
+            scope_level=Scope.REQUEST.level,
+            is_cached=False,
+            cache_owner_scope_level=None,
+            provider_attribute="factory",
+        )
+        dependency = _dependency(provides=leaf_workflow.provides, name=f"leaf_{index}")
+        leaf_workflows.append(leaf_workflow)
+        dependencies.append(dependency)
+        dependency_plans.append(
+            ProviderDependencyPlan(
+                kind="provider",
+                dependency=dependency,
+                dependency_index=index,
+                dependency_slot=slot,
+            ),
+        )
+
+    if bound_kind == "ast-nodes":
+        literal_dependency = _dependency(provides=tuple[object, ...], name="values")
+        dependencies.append(literal_dependency)
+        dependency_plans.append(
+            ProviderDependencyPlan(
+                kind="literal",
+                dependency=literal_dependency,
+                dependency_index=1,
+                literal_expression="(" + ", ".join("None" for _ in range(130)) + ",)",
+            ),
+        )
+
+    root_slot = 90 + leaf_count
+    root_workflow = _workflow_plan(
+        slot=root_slot,
+        provides=_BoundedRoot,
+        scope_level=Scope.REQUEST.level,
+        is_cached=False,
+        cache_owner_scope_level=None,
+        provider_attribute="factory",
+        dependencies=tuple(dependencies),
+        dependency_slots=tuple(plan.dependency_slot for plan in dependency_plans),
+        dependency_requires_async=tuple(False for _ in dependency_plans),
+        dependency_plans=tuple(dependency_plans),
+    )
+    workflows: list[ProviderWorkflowPlan] = [*leaf_workflows, root_workflow]
+    if bound_kind != "call-count":
+        workflows.extend(
+            (
+                _workflow_plan(
+                    slot=root_slot + 1,
+                    provides=str,
+                    scope_level=Scope.REQUEST.level,
+                    is_cached=False,
+                    cache_owner_scope_level=None,
+                    provider_attribute="factory",
+                ),
+                _workflow_plan(
+                    slot=root_slot + 2,
+                    provides=bytes,
+                    scope_level=Scope.REQUEST.level,
+                    is_cached=False,
+                    cache_owner_scope_level=None,
+                    provider_attribute="factory",
+                ),
+            ),
+        )
+    if bound_kind == "dispatch-cache":
+        workflows = [*leaf_workflows, root_workflow]
+
+    runtime = _runtime(
+        scopes=(_scope_plan(level=Scope.APP.level, name="app"), request_scope),
+        workflows=tuple(workflows),
+    )
+    compiler = compiler_module.ResolversAssemblyCompiler()
+    dispatch = compiler._compile_dispatch_method(
+        runtime=runtime,
+        class_plan=request_scope,
+        generated_globals=compiler._build_generated_globals(runtime=runtime),
+        is_async=False,
+    )
+
+    assert f"_provider_{root_slot}" not in dispatch.__code__.co_names
+    assert f"resolve_{root_slot}" in dispatch.__code__.co_names
+
+
+@pytest.mark.parametrize(
+    "unsafe_workflow",
+    [
+        _workflow_plan(
+            slot=93,
+            scope_level=Scope.REQUEST.level,
+            is_cached=True,
+            cache_owner_scope_level=Scope.REQUEST.level,
+            provider_attribute="factory",
+            dependencies=(_dependency(name="value"),),
+            dependency_slots=(90,),
+            dependency_requires_async=(False,),
+            dependency_plans=(
+                ProviderDependencyPlan(
+                    kind="provider",
+                    dependency=_dependency(name="value"),
+                    dependency_index=0,
+                    dependency_slot=90,
+                ),
+            ),
+        ),
+        _workflow_plan(
+            slot=94,
+            scope_level=Scope.REQUEST.level,
+            is_cached=False,
+            cache_owner_scope_level=None,
+            provider_attribute="factory",
+            requires_async=True,
+            is_provider_async=True,
+            dependencies=(_dependency(name="value"),),
+            dependency_slots=(90,),
+            dependency_requires_async=(False,),
+            dependency_plans=(
+                ProviderDependencyPlan(
+                    kind="provider",
+                    dependency=_dependency(name="value"),
+                    dependency_index=0,
+                    dependency_slot=90,
+                ),
+            ),
+        ),
+        _workflow_plan(
+            slot=95,
+            scope_level=Scope.REQUEST.level,
+            is_cached=False,
+            cache_owner_scope_level=None,
+            provider_attribute="factory",
+            provider_is_inject_wrapper=True,
+            dependencies=(_dependency(name="value"),),
+            dependency_slots=(90,),
+            dependency_requires_async=(False,),
+            dependency_plans=(
+                ProviderDependencyPlan(
+                    kind="provider",
+                    dependency=_dependency(name="value"),
+                    dependency_index=0,
+                    dependency_slot=90,
+                ),
+            ),
+        ),
+        replace(
+            _workflow_plan(
+                slot=96,
+                scope_level=Scope.REQUEST.level,
+                is_cached=False,
+                cache_owner_scope_level=None,
+                provider_attribute="factory",
+                dependencies=(_dependency(name="value"),),
+                dependency_slots=(90,),
+                dependency_requires_async=(False,),
+                dependency_plans=(
+                    ProviderDependencyPlan(
+                        kind="provider",
+                        dependency=_dependency(name="value"),
+                        dependency_index=0,
+                        dependency_slot=90,
+                    ),
+                ),
+            ),
+            needs_cleanup=True,
+        ),
+        _workflow_plan(
+            slot=97,
+            scope_level=Scope.REQUEST.level,
+            is_cached=False,
+            cache_owner_scope_level=None,
+            provider_attribute="factory",
+            dependencies=(_dependency(name="value"),),
+            dependency_slots=(90,),
+            dependency_requires_async=(False,),
+            dependency_plans=(),
+        ),
+        _workflow_plan(
+            slot=98,
+            scope_level=Scope.REQUEST.level,
+            is_cached=False,
+            cache_owner_scope_level=None,
+            provider_attribute="factory",
+            dependencies=(_dependency(name="value"),),
+            dependency_slots=(None,),
+            dependency_requires_async=(False,),
+            dependency_plans=(
+                ProviderDependencyPlan(
+                    kind="all",
+                    dependency=_dependency(name="value"),
+                    dependency_index=0,
+                    all_slots=(90,),
+                ),
+            ),
+        ),
+    ],
+    ids=(
+        "cached",
+        "async",
+        "inject-wrapper",
+        "cleanup",
+        "incomplete-plan",
+        "all-dependency",
+    ),
+)
+def test_optimized_sync_dependency_expression_keeps_unsafe_transient_boundaries(
+    unsafe_workflow: ProviderWorkflowPlan,
+) -> None:
+    compiler = compiler_module.ResolversAssemblyCompiler()
+    request_scope = _scope_plan(level=Scope.REQUEST.level, name="request")
+    leaf_workflow = _workflow_plan(
+        slot=90,
+        scope_level=Scope.REQUEST.level,
+        is_cached=False,
+        cache_owner_scope_level=None,
+        provider_attribute="factory",
+    )
+    runtime = _runtime(
+        scopes=(_scope_plan(level=Scope.APP.level, name="app"), request_scope),
+        workflows=(leaf_workflow, unsafe_workflow),
+    )
+    dependency = _dependency(provides=unsafe_workflow.provides)
+    expression = compiler._optimized_sync_dependency_expression(
+        runtime=runtime,
+        class_plan=request_scope,
+        dependency_plan=ProviderDependencyPlan(
+            kind="provider",
+            dependency=dependency,
+            dependency_index=0,
+            dependency_slot=unsafe_workflow.slot,
+        ),
+        resolver_expression="self._root_resolver",
+    )
+
+    assert isinstance(expression, str)
+    assert f"_provider_{unsafe_workflow.slot}(" not in expression
+
+
+def _cached_fusion_test_workflow(
+    *,
+    slot: int,
+    provides: Any,
+    children: tuple[ProviderWorkflowPlan, ...] = (),
+    dependency_kinds: tuple[inspect._ParameterKind, ...] | None = None,
+) -> ProviderWorkflowPlan:
+    if dependency_kinds is None:
+        dependency_kinds = tuple(inspect.Parameter.POSITIONAL_OR_KEYWORD for _ in children)
+    dependencies = tuple(
+        _dependency(
+            provides=child.provides,
+            name=f"dependency_{index}",
+            kind=parameter_kind,
+        )
+        for index, (child, parameter_kind) in enumerate(
+            zip(children, dependency_kinds, strict=True),
+        )
+    )
+    return replace(
+        _workflow_plan(
+            slot=slot,
+            provides=provides,
+            provider_attribute="factory",
+            scope_level=Scope.REQUEST.level,
+            cache_owner_scope_level=Scope.REQUEST.level,
+            dependencies=dependencies,
+            dependency_slots=tuple(child.slot for child in children),
+            dependency_requires_async=tuple(False for _ in children),
+            dependency_plans=tuple(
+                ProviderDependencyPlan(
+                    kind="provider",
+                    dependency=dependency,
+                    dependency_index=index,
+                    dependency_slot=child.slot,
+                )
+                for index, (dependency, child) in enumerate(
+                    zip(dependencies, children, strict=True),
+                )
+            ),
+        ),
+        lock_mode=LockMode.NONE,
+        effective_lock_mode=LockMode.NONE,
+    )
+
+
+def test_sync_cached_dispatch_fusion_supports_zero_and_one_child() -> None:
+    class _Leaf:
+        pass
+
+    class _OneChild:
+        pass
+
+    class _ZeroChild:
+        pass
+
+    root_scope = _scope_plan(level=Scope.APP.level, name="app")
+    request_scope = _scope_plan(level=Scope.REQUEST.level, name="request")
+    leaf = _cached_fusion_test_workflow(slot=80, provides=_Leaf)
+    one_child = _cached_fusion_test_workflow(
+        slot=81,
+        provides=_OneChild,
+        children=(leaf,),
+    )
+    zero_child = _cached_fusion_test_workflow(slot=82, provides=_ZeroChild)
+    compiler = compiler_module.ResolversAssemblyCompiler()
+
+    for workflows in ((zero_child,), (leaf, one_child)):
+        for ordered_workflows in (workflows, tuple(reversed(workflows))):
+            runtime = _runtime(
+                scopes=(root_scope, request_scope),
+                workflows=ordered_workflows,
+            )
+            generated_globals = compiler._build_generated_globals(runtime=runtime)
+            sync_dispatch = compiler._compile_dispatch_method(
+                runtime=runtime,
+                class_plan=request_scope,
+                generated_globals=generated_globals,
+                is_async=False,
+            )
+            async_dispatch = compiler._compile_dispatch_method(
+                runtime=runtime,
+                class_plan=request_scope,
+                generated_globals=generated_globals,
+                is_async=True,
+            )
+            target = zero_child if len(workflows) == 1 else one_child
+
+            assert f"_provider_{target.slot}" in sync_dispatch.__code__.co_names
+            assert f"resolve_{target.slot}" not in sync_dispatch.__code__.co_names
+            assert f"_provider_{target.slot}" not in async_dispatch.__code__.co_names
+            assert f"aresolve_{target.slot}" in async_dispatch.__code__.co_names
+
+            if target is one_child:
+                instructions = tuple(dis.get_instructions(sync_dispatch))
+                assert "_provider_80" in sync_dispatch.__code__.co_names
+                assert (
+                    sum(
+                        instruction.opname == "LOAD_ATTR" and instruction.argval == "_cache_80"
+                        for instruction in instructions
+                    )
+                    == 2
+                )
+
+
+def test_sync_cached_generator_dispatch_fusion_accepts_only_exact_safe_shape() -> None:
+    compiler = compiler_module.ResolversAssemblyCompiler()
+    root_scope = _scope_plan(level=Scope.APP.level, name="app")
+    request_scope = _scope_plan(level=Scope.REQUEST.level, name="request")
+    safe_workflow = replace(
+        _cached_fusion_test_workflow(slot=83, provides=bytearray),
+        provider_attribute="generator",
+        needs_cleanup=True,
+    )
+
+    def fusion_candidate(
+        workflow: ProviderWorkflowPlan,
+        *,
+        class_plan: ScopePlan = request_scope,
+        identity_workflows: tuple[ProviderWorkflowPlan, ...] | None = None,
+        has_cleanup: bool = True,
+    ) -> tuple[ProviderWorkflowPlan, tuple[ast.stmt, ...]] | None:
+        runtime = _runtime(
+            scopes=(root_scope, request_scope),
+            workflows=(workflow,),
+        )
+        runtime.has_cleanup = has_cleanup
+        if identity_workflows is None:
+            identity_workflows = (workflow,) if workflow.dispatch_kind == "identity" else ()
+        return compiler._sync_cached_generator_dispatch_fusion_candidate(
+            runtime=runtime,
+            class_plan=class_plan,
+            identity_workflows=identity_workflows,
+        )
+
+    candidate = fusion_candidate(safe_workflow)
+    assert candidate is not None
+    assert candidate[0] is safe_workflow
+
+    dependency = _dependency(provides=int)
+    dependency_plan = ProviderDependencyPlan(
+        kind="provider",
+        dependency=dependency,
+        dependency_index=0,
+        dependency_slot=84,
+    )
+    unsafe_workflows = (
+        replace(safe_workflow, scope_level=Scope.APP.level),
+        replace(safe_workflow, cache_owner_scope_level=Scope.APP.level),
+        replace(safe_workflow, max_required_scope_level=Scope.REQUEST.level + 1),
+        replace(safe_workflow, is_cached=False, cache_owner_scope_level=None),
+        replace(safe_workflow, is_transient=True),
+        replace(safe_workflow, lock_mode="auto"),
+        replace(safe_workflow, effective_lock_mode=LockMode.THREAD),
+        replace(safe_workflow, uses_thread_lock=True),
+        replace(safe_workflow, uses_async_lock=True),
+        replace(safe_workflow, requires_async=True),
+        replace(safe_workflow, is_provider_async=True),
+        replace(safe_workflow, provider_attribute="factory"),
+        replace(safe_workflow, provider_is_inject_wrapper=True),
+        replace(safe_workflow, needs_cleanup=False),
+        replace(
+            safe_workflow,
+            dependencies=(dependency,),
+            dependency_slots=(84,),
+            dependency_requires_async=(False,),
+        ),
+        replace(safe_workflow, dependency_plans=(dependency_plan,)),
+        replace(safe_workflow, sync_arguments=("self.resolve_84()",)),
+        replace(safe_workflow, dispatch_kind="equality_map"),
+    )
+    for unsafe_workflow in unsafe_workflows:
+        assert fusion_candidate(unsafe_workflow) is None
+
+    assert fusion_candidate(safe_workflow, class_plan=root_scope) is None
+    assert fusion_candidate(safe_workflow, identity_workflows=()) is None
+    assert fusion_candidate(safe_workflow, has_cleanup=False) is None
+
+    cloned_workflow = replace(safe_workflow)
+    assert fusion_candidate(safe_workflow, identity_workflows=(cloned_workflow,)) is None
+
+    second_workflow = replace(safe_workflow, slot=84, provides=bytes)
+    multiple_runtime = _runtime(
+        scopes=(root_scope, request_scope),
+        workflows=(safe_workflow, second_workflow),
+    )
+    assert (
+        compiler._sync_cached_generator_dispatch_fusion_candidate(
+            runtime=multiple_runtime,
+            class_plan=request_scope,
+            identity_workflows=(safe_workflow, second_workflow),
+        )
+        is None
+    )
+
+
+def test_specialized_sync_generator_body_lines_cover_cache_and_cleanup_variants() -> None:
+    compiler = compiler_module.ResolversAssemblyCompiler()
+    root_scope = _scope_plan(level=Scope.APP.level, name="app")
+    root_workflow = _workflow_plan(
+        slot=84,
+        provider_attribute="generator",
+        scope_level=Scope.APP.level,
+        cache_owner_scope_level=Scope.APP.level,
+    )
+    root_runtime = _runtime(scopes=(root_scope,), workflows=(root_workflow,))
+
+    root_lines = compiler._specialized_sync_generator_body_lines(
+        runtime=root_runtime,
+        workflow=root_workflow,
+        arguments="",
+    )
+
+    assert "self._cache_84 = value" in root_lines
+    assert "self.resolve_84 = lambda: value" in root_lines
+
+    transient_workflow = _workflow_plan(
+        slot=85,
+        provider_attribute="generator",
+        is_cached=False,
+        cache_owner_scope_level=None,
+    )
+    transient_runtime = _runtime(scopes=(root_scope,), workflows=(transient_workflow,))
+    transient_runtime.has_cleanup = False
+
+    assert compiler._specialized_sync_generator_body_lines(
+        runtime=transient_runtime,
+        workflow=transient_workflow,
+        arguments="",
+    ) == [
+        "provider_gen = _provider_85()",
+        "value = next(provider_gen)",
+        "return value",
+    ]
+
+
+def test_sync_cached_fusion_workflow_safety_rejects_every_unsafe_shape() -> None:
+    compiler = compiler_module.ResolversAssemblyCompiler()
+    request_scope = _scope_plan(level=Scope.REQUEST.level, name="request")
+    child = _cached_fusion_test_workflow(slot=80, provides=bytes)
+    safe_workflow = _cached_fusion_test_workflow(
+        slot=81,
+        provides=bytearray,
+        children=(child,),
+    )
+    assert compiler._sync_cached_fusion_workflow_is_safe(
+        class_plan=request_scope,
+        workflow=safe_workflow,
+    )
+
+    dependency_plan = safe_workflow.dependency_plans[0]
+    positional_variadic = _dependency(
+        provides=child.provides,
+        name="args",
+        kind=inspect.Parameter.VAR_POSITIONAL,
+    )
+    keyword_variadic = _dependency(
+        provides=child.provides,
+        name="kwargs",
+        kind=inspect.Parameter.VAR_KEYWORD,
+    )
+    mismatched_dependency = _dependency(provides=child.provides, name="other")
+    unsafe_workflows = (
+        replace(safe_workflow, scope_level=Scope.APP.level),
+        replace(safe_workflow, cache_owner_scope_level=Scope.APP.level),
+        replace(safe_workflow, max_required_scope_level=Scope.REQUEST.level + 1),
+        replace(safe_workflow, is_cached=False),
+        replace(safe_workflow, is_transient=True),
+        replace(safe_workflow, effective_lock_mode=LockMode.THREAD),
+        replace(safe_workflow, uses_thread_lock=True),
+        replace(safe_workflow, uses_async_lock=True),
+        replace(safe_workflow, requires_async=True),
+        replace(safe_workflow, is_provider_async=True),
+        replace(safe_workflow, provider_attribute="instance"),
+        replace(safe_workflow, provider_is_inject_wrapper=True),
+        replace(safe_workflow, needs_cleanup=True),
+        replace(safe_workflow, dispatch_kind="equality_map"),
+        replace(safe_workflow, dependency_plans=()),
+        replace(
+            safe_workflow,
+            dependency_plans=(replace(dependency_plan, dependency=mismatched_dependency),),
+        ),
+        replace(
+            safe_workflow,
+            dependencies=(positional_variadic,),
+            dependency_plans=(replace(dependency_plan, dependency=positional_variadic),),
+        ),
+        replace(
+            safe_workflow,
+            dependencies=(keyword_variadic,),
+            dependency_plans=(replace(dependency_plan, dependency=keyword_variadic),),
+        ),
+        replace(
+            safe_workflow,
+            dependency_plans=(replace(dependency_plan, dependency_requires_async=True),),
+        ),
+    )
+
+    for unsafe_workflow in unsafe_workflows:
+        assert not compiler._sync_cached_fusion_workflow_is_safe(
+            class_plan=request_scope,
+            workflow=unsafe_workflow,
+        )
+
+
+def test_sync_cached_dispatch_fusion_rejects_unsafe_shapes_and_bounds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _ChildA:
+        pass
+
+    class _ChildB:
+        pass
+
+    class _Target:
+        pass
+
+    compiler = compiler_module.ResolversAssemblyCompiler()
+    root_scope = _scope_plan(level=Scope.APP.level, name="app")
+    request_scope = _scope_plan(level=Scope.REQUEST.level, name="request")
+    child_a = _cached_fusion_test_workflow(slot=90, provides=_ChildA)
+    child_b = _cached_fusion_test_workflow(slot=91, provides=_ChildB)
+    target = _cached_fusion_test_workflow(
+        slot=92,
+        provides=_Target,
+        children=(child_a, child_b),
+    )
+
+    def fusion_candidate(
+        *,
+        workflows: tuple[ProviderWorkflowPlan, ...],
+        class_plan: ScopePlan = request_scope,
+    ) -> tuple[ProviderWorkflowPlan, tuple[ast.stmt, ...]] | None:
+        runtime = _runtime(scopes=(root_scope, request_scope), workflows=workflows)
+        identity_workflows = tuple(
+            workflow
+            for workflow in compiler_module._dispatch_workflows(
+                plan=runtime.plan,
+                class_plan=class_plan,
+            )
+            if workflow.dispatch_kind == "identity"
+        )
+        return compiler._sync_cached_dispatch_fusion_candidate(
+            runtime=runtime,
+            class_plan=class_plan,
+            identity_workflows=identity_workflows,
+        )
+
+    def assert_safe_fallback_selected(
+        *,
+        workflows: tuple[ProviderWorkflowPlan, ...],
+    ) -> None:
+        candidate = fusion_candidate(workflows=workflows)
+
+        assert candidate is not None
+        assert candidate[0].slot == child_b.slot
+
+    assert fusion_candidate(workflows=(child_a, child_b, target)) is not None
+    assert (
+        fusion_candidate(
+            workflows=(child_a, child_b, target),
+            class_plan=root_scope,
+        )
+        is None
+    )
+    transient = replace(
+        child_a,
+        slot=93,
+        lifetime=Lifetime.TRANSIENT,
+        is_cached=False,
+        is_transient=True,
+        cache_owner_scope_level=None,
+    )
+    assert fusion_candidate(workflows=(child_a, child_b, target, transient)) is None
+
+    non_provider_plan = replace(target.dependency_plans[0], kind="literal")
+    missing_slot_plan = replace(target.dependency_plans[0], dependency_slot=None)
+    unknown_slot_plan = replace(target.dependency_plans[0], dependency_slot=999)
+    keyword_only_target = _cached_fusion_test_workflow(
+        slot=92,
+        provides=_Target,
+        children=(child_a, child_b),
+        dependency_kinds=(
+            inspect.Parameter.KEYWORD_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        ),
+    )
+    self_child_target = replace(
+        target,
+        dependency_plans=(
+            replace(target.dependency_plans[0], dependency_slot=target.slot),
+            target.dependency_plans[1],
+        ),
+        dependency_slots=(target.slot, child_b.slot),
+    )
+    too_many_child_dependencies = tuple(
+        _dependency(provides=_ChildB, name=f"nested_{index}")
+        for index in range(compiler_module._SYNC_CACHED_FUSION_MAX_CHILD_DEPENDENCIES + 1)
+    )
+    oversized_child = replace(
+        child_a,
+        dependencies=too_many_child_dependencies,
+        dependency_slots=tuple(child_b.slot for _ in too_many_child_dependencies),
+        dependency_requires_async=tuple(False for _ in too_many_child_dependencies),
+        dependency_plans=tuple(
+            ProviderDependencyPlan(
+                kind="provider",
+                dependency=dependency,
+                dependency_index=index,
+                dependency_slot=child_b.slot,
+            )
+            for index, dependency in enumerate(too_many_child_dependencies)
+        ),
+    )
+    unsafe_child = replace(child_a, effective_lock_mode=LockMode.THREAD)
+    target_variants = (
+        replace(target, effective_lock_mode=LockMode.THREAD),
+        replace(target, dependency_order_is_signature_order=False),
+        replace(
+            target,
+            dependency_plans=(non_provider_plan, target.dependency_plans[1]),
+        ),
+        replace(
+            target,
+            dependency_plans=(missing_slot_plan, target.dependency_plans[1]),
+        ),
+        replace(
+            target,
+            dependency_plans=(unknown_slot_plan, target.dependency_plans[1]),
+        ),
+        keyword_only_target,
+    )
+    for target_variant in target_variants:
+        assert_safe_fallback_selected(workflows=(child_a, child_b, target_variant))
+
+    assert_safe_fallback_selected(workflows=(child_a, child_b, self_child_target))
+    assert_safe_fallback_selected(workflows=(oversized_child, child_b, target))
+    assert_safe_fallback_selected(workflows=(unsafe_child, child_b, target))
+
+    monkeypatch.setattr(compiler_module, "_SYNC_CACHED_FUSION_MAX_AST_NODES", 1)
+    assert fusion_candidate(workflows=(child_a, child_b, target)) is None
+
+
+def test_sync_cached_dispatch_fusion_selects_largest_then_highest_slot() -> None:
+    child_types = tuple(type(f"_Child{index}", (), {}) for index in range(3))
+    target_types = tuple(type(f"_Target{index}", (), {}) for index in range(4))
+    children = tuple(
+        _cached_fusion_test_workflow(slot=200 + index, provides=child_type)
+        for index, child_type in enumerate(child_types)
+    )
+    targets = (
+        _cached_fusion_test_workflow(
+            slot=210,
+            provides=target_types[0],
+            children=children[:2],
+        ),
+        _cached_fusion_test_workflow(
+            slot=211,
+            provides=target_types[1],
+            children=children,
+        ),
+        _cached_fusion_test_workflow(
+            slot=212,
+            provides=target_types[2],
+            children=children[:2],
+        ),
+        _cached_fusion_test_workflow(
+            slot=213,
+            provides=target_types[3],
+            children=children,
+        ),
+    )
+    workflows = (*children, *targets)
+    root_scope = _scope_plan(level=Scope.APP.level, name="app")
+    request_scope = _scope_plan(level=Scope.REQUEST.level, name="request")
+    compiler = compiler_module.ResolversAssemblyCompiler()
+
+    for ordered_workflows in (workflows, tuple(reversed(workflows))):
+        runtime = _runtime(
+            scopes=(root_scope, request_scope),
+            workflows=ordered_workflows,
+        )
+        dispatch = compiler._compile_dispatch_method(
+            runtime=runtime,
+            class_plan=request_scope,
+            generated_globals=compiler._build_generated_globals(runtime=runtime),
+            is_async=False,
+        )
+
+        assert "_provider_213" in dispatch.__code__.co_names
+        assert "resolve_213" not in dispatch.__code__.co_names
+        assert "resolve_210" in dispatch.__code__.co_names
+        assert "resolve_211" in dispatch.__code__.co_names
+        assert "resolve_212" in dispatch.__code__.co_names
+
+
+def test_cached_dispatch_fusion_is_bounded_deterministic_and_sync_only() -> None:
+    class _Left:
+        pass
+
+    class _Right:
+        pass
+
+    class _Target:
+        pass
+
+    request_scope = _scope_plan(level=Scope.REQUEST.level, name="request")
+    left_workflow = replace(
+        _workflow_plan(
+            slot=90,
+            provides=_Left,
+            provider_attribute="factory",
+            scope_level=Scope.REQUEST.level,
+            cache_owner_scope_level=Scope.REQUEST.level,
+        ),
+        lock_mode=LockMode.NONE,
+        effective_lock_mode=LockMode.NONE,
+    )
+    right_workflow = replace(left_workflow, slot=91, provides=_Right)
+    dependencies = (
+        _dependency(provides=_Left, name="left"),
+        _dependency(provides=_Right, name="right"),
+    )
+    target_workflow = replace(
+        _workflow_plan(
+            slot=92,
+            provides=_Target,
+            provider_attribute="factory",
+            scope_level=Scope.REQUEST.level,
+            cache_owner_scope_level=Scope.REQUEST.level,
+            dependencies=dependencies,
+            dependency_slots=(left_workflow.slot, right_workflow.slot),
+            dependency_requires_async=(False, False),
+            dependency_plans=tuple(
+                ProviderDependencyPlan(
+                    kind="provider",
+                    dependency=dependency,
+                    dependency_index=index,
+                    dependency_slot=slot,
+                )
+                for index, (dependency, slot) in enumerate(
+                    zip(
+                        dependencies,
+                        (left_workflow.slot, right_workflow.slot),
+                        strict=True,
+                    ),
+                )
+            ),
+        ),
+        lock_mode=LockMode.NONE,
+        effective_lock_mode=LockMode.NONE,
+    )
+    workflows = (left_workflow, right_workflow, target_workflow)
+    compiler = compiler_module.ResolversAssemblyCompiler()
+
+    for ordered_workflows in (workflows, tuple(reversed(workflows))):
+        runtime = _runtime(
+            scopes=(_scope_plan(level=Scope.APP.level, name="app"), request_scope),
+            workflows=ordered_workflows,
+        )
+        generated_globals = compiler._build_generated_globals(runtime=runtime)
+        sync_dispatch = compiler._compile_dispatch_method(
+            runtime=runtime,
+            class_plan=request_scope,
+            generated_globals=generated_globals,
+            is_async=False,
+        )
+        async_dispatch = compiler._compile_dispatch_method(
+            runtime=runtime,
+            class_plan=request_scope,
+            generated_globals=generated_globals,
+            is_async=True,
+        )
+
+        assert "_provider_92" in sync_dispatch.__code__.co_names
+        assert "_provider_90" in sync_dispatch.__code__.co_names
+        assert "_provider_91" in sync_dispatch.__code__.co_names
+        assert "resolve_92" not in sync_dispatch.__code__.co_names
+        instructions = tuple(dis.get_instructions(sync_dispatch))
+        instruction_index = {
+            instruction.argval: index
+            for index, instruction in enumerate(instructions)
+            if instruction.argval
+            in {
+                "_dep_90_type",
+                "_dep_91_type",
+                "_dep_92_type",
+                "_provider_90",
+                "_provider_91",
+            }
+        }
+        assert instruction_index["_dep_92_type"] < instruction_index["_dep_90_type"]
+        assert instruction_index["_dep_92_type"] < instruction_index["_dep_91_type"]
+        assert instruction_index["_provider_90"] < instruction_index["_dep_90_type"]
+        assert instruction_index["_provider_91"] < instruction_index["_dep_91_type"]
+        assert (
+            sum(
+                instruction.opname == "LOAD_ATTR" and instruction.argval == "_cache_90"
+                for instruction in instructions
+            )
+            >= 2
+        )
+        assert (
+            sum(
+                instruction.opname == "LOAD_ATTR" and instruction.argval == "_cache_91"
+                for instruction in instructions
+            )
+            >= 2
+        )
+        assert "_provider_92" not in async_dispatch.__code__.co_names
+        assert "aresolve_92" in async_dispatch.__code__.co_names
+
+    oversized_dependencies = tuple(
+        _dependency(provides=type(f"_Child{index}", (), {}), name=f"child_{index}")
+        for index in range(compiler_module._SYNC_CACHED_FUSION_MAX_CHILDREN + 1)
+    )
+    oversized_children = tuple(
+        replace(
+            left_workflow,
+            slot=100 + index,
+            provides=dependency.provides,
+        )
+        for index, dependency in enumerate(oversized_dependencies)
+    )
+    oversized_target = replace(
+        target_workflow,
+        slot=120,
+        dependencies=oversized_dependencies,
+        dependency_slots=tuple(workflow.slot for workflow in oversized_children),
+        dependency_requires_async=tuple(False for _ in oversized_children),
+        dependency_plans=tuple(
+            ProviderDependencyPlan(
+                kind="provider",
+                dependency=dependency,
+                dependency_index=index,
+                dependency_slot=workflow.slot,
+            )
+            for index, (dependency, workflow) in enumerate(
+                zip(oversized_dependencies, oversized_children, strict=True),
+            )
+        ),
+    )
+    oversized_runtime = _runtime(
+        scopes=(_scope_plan(level=Scope.APP.level, name="app"), request_scope),
+        workflows=(*oversized_children, oversized_target),
+    )
+    oversized_dispatch = compiler._compile_dispatch_method(
+        runtime=oversized_runtime,
+        class_plan=request_scope,
+        generated_globals=compiler._build_generated_globals(runtime=oversized_runtime),
+        is_async=False,
+    )
+    assert "_provider_120" not in oversized_dispatch.__code__.co_names
+    assert "resolve_120" in oversized_dispatch.__code__.co_names
+
+
+def test_dispatch_cache_is_disabled_only_when_every_workflow_is_cached() -> None:
+    root_scope = _scope_plan(level=Scope.APP.level, name="app")
+    request_scope = _scope_plan(level=Scope.REQUEST.level, name="request")
+    cached_workflows = tuple(_workflow_plan(slot=slot) for slot in range(1, 5))
+
+    for workflow_count in (1, 4):
+        plan = _generation_plan(
+            scopes=(root_scope, request_scope),
+            workflows=cached_workflows[:workflow_count],
+        )
+        assert not compiler_module._dispatch_cache_enabled_for_class(
+            plan=plan,
+            class_plan=root_scope,
+        )
+        assert not compiler_module._dispatch_cache_enabled_for_class(
+            plan=plan,
+            class_plan=request_scope,
+        )
+
+    transient_workflow = replace(
+        cached_workflows[0],
+        lifetime=Lifetime.TRANSIENT,
+        is_cached=False,
+        is_transient=True,
+        cache_owner_scope_level=None,
+    )
+    one_transient_plan = _generation_plan(
+        scopes=(root_scope, request_scope),
+        workflows=(transient_workflow,),
+    )
+    assert compiler_module._dispatch_cache_enabled_for_class(
+        plan=one_transient_plan,
+        class_plan=request_scope,
+    )
+
+    mixed_plan = _generation_plan(
+        scopes=(root_scope, request_scope),
+        workflows=(*cached_workflows[:3], transient_workflow),
+    )
+    assert compiler_module._dispatch_cache_enabled_for_class(
+        plan=mixed_plan,
+        class_plan=root_scope,
+    )
+    assert compiler_module._dispatch_cache_enabled_for_class(
+        plan=mixed_plan,
+        class_plan=request_scope,
+    )
+
+
+@pytest.mark.asyncio
+async def test_all_cached_dispatch_omits_dead_cache_and_preserves_equality_lookup() -> None:
+    class _EqualityKey:
+        def __init__(self, value: int) -> None:
+            self.value = value
+
+        def __eq__(self, other: object) -> bool:
+            return isinstance(other, _EqualityKey) and self.value == other.value
+
+        def __hash__(self) -> int:
+            return hash(self.value)
+
+    registration_keys = tuple(_EqualityKey(value) for value in range(4))
+    registered_values = tuple(object() for _ in registration_keys)
+    container = Container(use_resolver_context=False)
+    for key, value in zip(registration_keys, registered_values, strict=True):
+        container.add_instance(value, provides=key)
+    resolver = container.compile()
+
+    with resolver.enter_scope(Scope.REQUEST) as request_scope:
+        request_slots = cast("Any", type(request_scope)).__slots__
+        assert "_last_sync_dependency" not in request_slots
+        assert "_last_sync_method" not in request_slots
+        assert "_last_async_dependency" not in request_slots
+        assert "_last_async_method" not in request_slots
+        assert "_last_sync_dependency" not in request_scope.resolve.__code__.co_names
+        assert "_last_async_dependency" not in request_scope.aresolve.__code__.co_names
+
+        lookup_key = _EqualityKey(registration_keys[0].value)
+        assert lookup_key is not registration_keys[0]
+        assert request_scope.resolve(lookup_key) is registered_values[0]
+        assert await request_scope.aresolve(lookup_key) is registered_values[0]
+
+        with pytest.raises(DIWireDependencyNotRegisteredError, match="is not registered"):
+            request_scope.resolve(_EqualityKey(99))
+        with pytest.raises(DIWireDependencyNotRegisteredError, match="is not registered"):
+            await request_scope.aresolve(_EqualityKey(99))
 
 
 def test_resolver_init_additional_branches() -> None:

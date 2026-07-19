@@ -562,7 +562,7 @@ def test_open_generic_resolver_thread_lock_first_touch_is_singleton_under_concur
     dependency = _Generic[int]
     barrier = threading.Barrier(24)
 
-    def _resolve_thread_lock() -> Any:
+    def _resolve_thread_lock() -> threading.Lock:
         barrier.wait()
         return resolver.get_thread_lock(dependency)
 
@@ -571,6 +571,290 @@ def test_open_generic_resolver_thread_lock_first_touch_is_singleton_under_concur
         locks = [future.result() for future in futures]
 
     assert len({id(lock) for lock in locks}) == 1
+
+
+def test_open_generic_direct_child_factory_initializes_complete_fresh_state() -> None:
+    registry = open_generics.OpenGenericRegistry()
+    base_resolver = cast("Any", _MissingResolver())
+    root = open_generics.OpenGenericResolver(
+        base_resolver=base_resolver,
+        registry=registry,
+        root_scope=Scope.APP,
+        has_async_specs=False,
+        scope_level=Scope.APP.level,
+    )
+    constructor_child = open_generics.OpenGenericResolver(
+        base_resolver=base_resolver,
+        registry=registry,
+        root_scope=Scope.APP,
+        has_async_specs=False,
+        scope_level=Scope.REQUEST.level,
+        root_wrapper=root,
+        parent_wrapper=root,
+    )
+
+    factory_child = open_generics._create_open_generic_child(
+        base_resolver,
+        root,
+        Scope.REQUEST.level,
+    )
+    next_factory_child = open_generics._create_open_generic_child(
+        base_resolver,
+        root,
+        Scope.REQUEST.level,
+    )
+
+    assert type(factory_child) is open_generics.OpenGenericResolver
+    assert factory_child is not constructor_child
+    assert next_factory_child is not factory_child
+    assert all(hasattr(factory_child, slot) for slot in factory_child.__slots__)
+    assert factory_child._base_resolver is constructor_child._base_resolver
+    assert factory_child._registry is constructor_child._registry
+    assert factory_child._root_scope is constructor_child._root_scope
+    assert factory_child._root_wrapper is root
+    assert factory_child._parent_wrapper is root
+    assert factory_child._scope_level == constructor_child._scope_level
+    assert factory_child._cleanup_enabled is constructor_child._cleanup_enabled
+    assert factory_child._local_state_lock is constructor_child._local_state_lock
+    assert factory_child._shared_child_state is constructor_child._shared_child_state
+    assert (
+        factory_child._scope_transition_cache_for_level
+        is constructor_child._scope_transition_cache_for_level
+    )
+    assert factory_child._cache is None
+    assert factory_child._thread_locks is None
+    assert factory_child._async_locks is None
+    assert factory_child._cleanup_callbacks is None
+    assert factory_child._owned_scope_wrappers == ()
+    assert factory_child._sync_base_slot_resolvers is None
+    assert factory_child._async_base_slot_resolvers is None
+    assert factory_child._sync_inline_resolver is constructor_child._sync_inline_resolver
+    assert factory_child._async_inline_resolver is constructor_child._async_inline_resolver
+
+
+def test_open_generic_warmed_one_hop_entry_bypasses_transition_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base_resolver = _MissingResolver()
+    base_resolver._cleanup_enabled = False
+    root = open_generics.OpenGenericResolver(
+        base_resolver=cast("Any", base_resolver),
+        registry=open_generics.OpenGenericRegistry(),
+        root_scope=Scope.APP,
+        has_async_specs=False,
+        scope_level=Scope.APP.level,
+    )
+    cold_child = root.enter_scope(Scope.REQUEST)
+
+    def fail_transition_fallback(*_args: object, **_kwargs: object) -> Any:
+        msg = "transition fallback used"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(
+        open_generics.OpenGenericResolver,
+        "_resolve_scope_transition_path_cached",
+        fail_transition_fallback,
+    )
+
+    hot_child = root.enter_scope(Scope.REQUEST)
+
+    assert hot_child is not cold_child
+    assert type(hot_child) is open_generics.OpenGenericResolver
+    assert all(hasattr(hot_child, slot) for slot in hot_child.__slots__)
+    assert hot_child._root_wrapper is root
+    assert hot_child._parent_wrapper is root
+    assert hot_child._scope_level == Scope.REQUEST.level
+    assert hot_child._cleanup_enabled is False
+    assert hot_child._shared_child_state is root._shared_child_state
+    assert hot_child._cache is None
+    assert hot_child._thread_locks is None
+    assert hot_child._async_locks is None
+    assert hot_child._cleanup_callbacks is None
+    assert hot_child._owned_scope_wrappers == ()
+
+    with pytest.raises(AssertionError, match="transition fallback used"):
+        root.enter_scope(Scope.ACTION)
+
+
+def test_open_generic_warmed_one_hop_entry_inlines_complete_child_initialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base_resolver = _MissingResolver()
+    base_resolver._cleanup_enabled = False
+    root = open_generics.OpenGenericResolver(
+        base_resolver=cast("Any", base_resolver),
+        registry=open_generics.OpenGenericRegistry(),
+        root_scope=Scope.APP,
+        has_async_specs=False,
+        scope_level=Scope.APP.level,
+    )
+    cold_child = root.enter_scope(Scope.REQUEST)
+
+    def fail_general_child_factory(*_args: object, **_kwargs: object) -> Any:
+        msg = "general child factory used"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(
+        open_generics,
+        "_create_open_generic_child",
+        fail_general_child_factory,
+    )
+
+    hot_child = root.enter_scope(Scope.REQUEST)
+
+    assert hot_child is not cold_child
+    assert type(hot_child) is open_generics.OpenGenericResolver
+    assert all(hasattr(hot_child, slot) for slot in hot_child.__slots__)
+    assert hot_child._base_resolver is cast("Any", base_resolver)
+    assert hot_child._root_wrapper is root
+    assert hot_child._parent_wrapper is root
+    assert hot_child._scope_level == Scope.REQUEST.level
+    assert hot_child._cleanup_enabled is False
+    assert hot_child._shared_child_state is root._shared_child_state
+    assert hot_child._cache is None
+    assert hot_child._thread_locks is None
+    assert hot_child._async_locks is None
+    assert hot_child._cleanup_callbacks is None
+    assert hot_child._owned_scope_wrappers == ()
+
+
+def test_open_generic_default_and_child_entries_keep_transition_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = open_generics.OpenGenericResolver(
+        base_resolver=cast("Any", _MissingResolver()),
+        registry=open_generics.OpenGenericRegistry(),
+        root_scope=Scope.APP,
+        has_async_specs=False,
+        scope_level=Scope.APP.level,
+    )
+    root.enter_scope()
+
+    def fail_transition_fallback(*_args: object, **_kwargs: object) -> Any:
+        msg = "transition fallback used"
+        raise AssertionError(msg)
+
+    with monkeypatch.context() as context:
+        context.setattr(
+            open_generics.OpenGenericResolver,
+            "_resolve_scope_transition_path_cached",
+            fail_transition_fallback,
+        )
+        with pytest.raises(AssertionError, match="transition fallback used"):
+            root.enter_scope()
+
+    request_child = root.enter_scope(Scope.REQUEST)
+    request_child.enter_scope(Scope.ACTION)
+
+    with monkeypatch.context() as context:
+        context.setattr(
+            open_generics.OpenGenericResolver,
+            "_resolve_scope_transition_path_cached",
+            fail_transition_fallback,
+        )
+        with pytest.raises(AssertionError, match="transition fallback used"):
+            request_child.enter_scope(Scope.ACTION)
+
+
+def test_open_generic_hot_transition_entry_is_coherent_under_concurrency() -> None:
+    root = open_generics.OpenGenericResolver(
+        base_resolver=cast("Any", _MissingResolver()),
+        registry=open_generics.OpenGenericRegistry(),
+        root_scope=Scope.APP,
+        has_async_specs=False,
+        scope_level=Scope.APP.level,
+    )
+    barrier = threading.Barrier(24)
+    targets = (Scope.REQUEST, Scope.ACTION) * 12
+
+    def enter_target(target: BaseScope) -> int:
+        barrier.wait()
+        observed_levels = {root.enter_scope(target).scope_level for _ in range(100)}
+        assert observed_levels == {target.level}
+        return target.level
+
+    with ThreadPoolExecutor(max_workers=len(targets)) as executor:
+        observed = tuple(executor.map(enter_target, targets))
+
+    assert observed == tuple(target.level for target in targets)
+
+
+def test_open_generic_child_local_state_is_isolated_during_concurrent_first_touch() -> None:
+    resolver = open_generics.OpenGenericResolver(
+        base_resolver=cast("Any", _MissingResolver()),
+        registry=open_generics.OpenGenericRegistry(),
+        root_scope=Scope.APP,
+        has_async_specs=False,
+        scope_level=Scope.APP.level,
+    )
+    first_child = resolver.enter_scope(Scope.REQUEST)
+    second_child = resolver.enter_scope(Scope.REQUEST)
+    dependency = _Generic[int]
+    barrier = threading.Barrier(24)
+
+    def _resolve_thread_lock(
+        child: open_generics.OpenGenericResolver,
+    ) -> threading.Lock:
+        barrier.wait()
+        return child.get_thread_lock(dependency)
+
+    children = [first_child, second_child] * 12
+    with ThreadPoolExecutor(max_workers=len(children)) as executor:
+        locks = list(executor.map(_resolve_thread_lock, children))
+
+    first_locks = locks[::2]
+    second_locks = locks[1::2]
+    assert len({id(lock) for lock in first_locks}) == 1
+    assert len({id(lock) for lock in second_locks}) == 1
+    assert first_locks[0] is not second_locks[0]
+
+    first_child.set_cached(dependency=dependency, value="first")
+    second_child.set_cached(dependency=dependency, value="second")
+    assert first_child.get_cached(dependency) == "first"
+    assert second_child.get_cached(dependency) == "second"
+
+    first_async_lock = first_child.get_async_lock(dependency)
+    second_async_lock = second_child.get_async_lock(dependency)
+    assert first_child.get_async_lock(dependency) is first_async_lock
+    assert second_child.get_async_lock(dependency) is second_async_lock
+    assert first_async_lock is not second_async_lock
+
+    cleanup_events: list[str] = []
+    first_child._register_cleanup(
+        kind=0,
+        callback=lambda *_args: cleanup_events.append("first"),
+    )
+    second_child._register_cleanup(
+        kind=0,
+        callback=lambda *_args: cleanup_events.append("second"),
+    )
+    first_child.close()
+    assert cleanup_events == ["first"]
+    second_child.close()
+    assert cleanup_events == ["first", "second"]
+
+
+def test_open_generic_concurrent_scope_entry_creates_fresh_child_wrappers() -> None:
+    resolver = open_generics.OpenGenericResolver(
+        base_resolver=cast("Any", _MissingResolver()),
+        registry=open_generics.OpenGenericRegistry(),
+        root_scope=Scope.APP,
+        has_async_specs=False,
+        scope_level=Scope.APP.level,
+    )
+    barrier = threading.Barrier(24)
+
+    def _enter_scope(index: int) -> open_generics.OpenGenericResolver:
+        barrier.wait()
+        child = resolver.enter_scope(Scope.REQUEST)
+        child.set_cached(dependency=index, value=index)
+        return child
+
+    with ThreadPoolExecutor(max_workers=24) as executor:
+        children = list(executor.map(_enter_scope, range(24)))
+
+    assert len({id(child) for child in children}) == len(children)
+    assert [child.get_cached(index) for index, child in enumerate(children)] == list(range(24))
 
 
 def test_open_generic_resolver_cache_first_touch_preserves_concurrent_writes() -> None:

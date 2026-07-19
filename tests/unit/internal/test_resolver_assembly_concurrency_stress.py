@@ -21,6 +21,25 @@ class _AsyncSingleton:
 
 
 class _ThreadScoped:
+    def __init__(self) -> None:
+        self.initialized = False
+
+
+class _ThreadScopedIntermediate:
+    def __init__(self, dependency: _ThreadScoped) -> None:
+        self.dependency = dependency
+
+
+class _ThreadScopedConsumer:
+    def __init__(self, intermediate: _ThreadScopedIntermediate) -> None:
+        self.intermediate = intermediate
+
+    @property
+    def dependency(self) -> _ThreadScoped:
+        return self.intermediate.dependency
+
+
+class _ThreadFusionFiller:
     pass
 
 
@@ -132,6 +151,75 @@ def test_concurrency_stress_thread_safe_scoped_constructs_once_per_scope() -> No
         assert second_scope_value is second_scope.resolve(_ThreadScoped)
         assert second_scope_value is not first_scope_results[0]
 
+    assert calls == 2
+
+
+def test_concurrency_stress_current_scope_dependency_fast_path_publishes_once() -> None:
+    calls = 0
+
+    def build_scoped() -> _ThreadScoped:
+        nonlocal calls
+        calls += 1
+        dependency = _ThreadScoped()
+        dependency.initialized = True
+        return dependency
+
+    container = Container(use_resolver_context=False)
+    container.add_factory(
+        build_scoped,
+        provides=_ThreadScoped,
+        lifetime=Lifetime.SCOPED,
+        scope=Scope.REQUEST,
+        lock_mode=LockMode.THREAD,
+    )
+    container.add(
+        _ThreadScopedIntermediate,
+        provides=_ThreadScopedIntermediate,
+        lifetime=Lifetime.TRANSIENT,
+        scope=Scope.REQUEST,
+    )
+    container.add(
+        _ThreadScopedConsumer,
+        provides=_ThreadScopedConsumer,
+        lifetime=Lifetime.TRANSIENT,
+        scope=Scope.REQUEST,
+    )
+    container.add(
+        _ThreadFusionFiller,
+        lifetime=Lifetime.TRANSIENT,
+        scope=Scope.REQUEST,
+    )
+    container.compile()
+    start = threading.Barrier(_THREAD_WORKERS)
+
+    with container.enter_scope(Scope.REQUEST) as request_scope:
+        consumer_slot = container._providers_registrations.get_by_type(
+            _ThreadScopedConsumer,
+        ).slot
+        assert f"_provider_{consumer_slot}" in request_scope.resolve.__code__.co_names
+        assert f"resolve_{consumer_slot}" not in request_scope.resolve.__code__.co_names
+
+        def resolve_consumer() -> _ThreadScopedConsumer:
+            start.wait()
+            return request_scope.resolve(_ThreadScopedConsumer)
+
+        with ThreadPoolExecutor(max_workers=_THREAD_WORKERS) as pool:
+            futures = [pool.submit(resolve_consumer) for _ in range(_THREAD_WORKERS)]
+            consumers = [future.result() for future in futures]
+
+        dependencies = [consumer.dependency for consumer in consumers]
+        assert calls == 1
+        assert len({id(consumer) for consumer in consumers}) == _THREAD_WORKERS
+        assert len({id(consumer.intermediate) for consumer in consumers}) == _THREAD_WORKERS
+        assert all(dependency is dependencies[0] for dependency in dependencies)
+        assert all(dependency.initialized for dependency in dependencies)
+        assert request_scope.resolve(_ThreadScopedConsumer).dependency is dependencies[0]
+
+    with container.enter_scope(Scope.REQUEST) as second_scope:
+        second_dependency = second_scope.resolve(_ThreadScopedConsumer).dependency
+
+    assert second_dependency is not dependencies[0]
+    assert second_dependency.initialized
     assert calls == 2
 
 
