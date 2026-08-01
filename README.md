@@ -77,6 +77,7 @@ class UserRepository:
 class UserService:
     repo: UserRepository
 
+
 container = Container()
 service = container.resolve(UserService)
 print(service.repo.db.host)  # => localhost
@@ -136,6 +137,7 @@ container = Container()
 
 def build_answer() -> int:
     return 42
+
 
 container.add_factory(build_answer)
 

@@ -400,13 +400,17 @@ def test_load_suite_manifest_rejects_invalid_cell_matrix(
     [
         (
             "missing",
-            "Expected 'competitor_versions' to contain exactly the benchmark packages; "
-            "missing=['rodi'], unexpected=[].",
+            (
+                "Expected 'competitor_versions' to contain exactly the benchmark packages; "
+                "missing=['rodi'], unexpected=[]."
+            ),
         ),
         (
             "unexpected",
-            "Expected 'competitor_versions' to contain exactly the benchmark packages; "
-            "missing=[], unexpected=['extra-package'].",
+            (
+                "Expected 'competitor_versions' to contain exactly the benchmark packages; "
+                "missing=[], unexpected=['extra-package']."
+            ),
         ),
     ],
 )
