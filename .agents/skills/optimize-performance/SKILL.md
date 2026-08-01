@@ -32,10 +32,14 @@ commit before claiming runtime improvement.
 ## Protect the worktree
 
 - Start each experiment from a committed, tested checkpoint.
-- Run `git status --short` and record which paths are already dirty. Treat those changes as user
-  work unless proven otherwise.
-- Prefer an isolated worktree when existing changes overlap the hot path or when baseline and
-  candidate must be measured side by side.
+- Require a clean worktree or create an isolated worktree before editing, committing, or rolling
+  back an experiment. Use sibling worktrees when baseline and candidate must be measured side by
+  side.
+- If neither is possible, record the complete pre-experiment state before editing: HEAD and index,
+  binary tracked diffs, untracked-path inventory, and content hashes for pre-existing files the
+  experiment might touch. Treat every pre-existing change as user work.
+- In that fallback, capture the exact experiment patch separately, stage only experiment-owned
+  hunks, and compare the complete post-rollback tree with the recorded pre-experiment state.
 - Assign one writer. Use subagents for read-only profiling, hypothesis generation, semantic
   review, and benchmark-methodology review so concurrent edits cannot contaminate an experiment.
 - Finish or pause CPU-heavy subagents and unrelated processes before official timing runs.
@@ -45,7 +49,8 @@ commit before claiming runtime improvement.
 ## Build the baseline
 
 1. Run focused correctness tests and the benchmark under stable conditions.
-2. Save raw results with unique names; never overwrite a prior run.
+2. Pass a unique caller-provided artifact path or directory for every baseline and candidate run.
+   Archive each raw result before the next run; never overwrite prior evidence.
 3. Repeat across fresh processes when supported. Inspect warmup, distributions, outliers, and
    environment metadata before summarizing.
 4. Profile a representative workload to locate the limiter. Do not use profiled timings as the
@@ -92,19 +97,22 @@ When accepting:
 
 1. Run formatting, linting, typing, tests, coverage, API-signature checks, and platform/runtime
    variants required by the repository.
-2. Commit immediately as one logical Conventional Commit. Include the hypothesis, environment,
-   exact commands, focused and broad results, regressions checked, and verification in the body.
+2. Stage only experiment-owned changes, inspect the complete staged diff, and commit immediately
+   as one logical Conventional Commit. Include the hypothesis, environment, exact commands,
+   focused and broad results, regressions checked, and verification in the body.
 3. Start the next hypothesis from that green checkpoint.
 
 When rejecting:
 
 1. Record the hypothesis, raw evidence, and rejection reason in the project experiment ledger or
    task report.
-2. Identify the exact tracked files changed by this experiment and verify they were clean at its
-   start.
-3. Restore only those owned tracked paths from the current checkpoint. Remove only exact untracked
-   artifacts created by the experiment and known to be disposable; otherwise preserve them.
-4. Re-run `git status --short` and the focused correctness test to prove the checkpoint is restored.
+2. Reverse only the exact experiment patch. Do not restore a whole path that contained
+   pre-existing changes. Remove only exact untracked artifacts created by the experiment and known
+   to be disposable; otherwise preserve them.
+3. Compare the complete post-rollback tree and index with the recorded pre-experiment state,
+   including pre-existing content hashes where applicable. Resolve any difference before moving
+   on; `git status --short` alone is insufficient proof.
+4. Run the focused correctness test to prove the checkpoint still behaves as expected.
 
 Reject or redesign when correctness fails, the target is reproducibly slower, the win does not
 clear the practical/noise threshold but adds complexity, a protected workload exceeds tolerance,

@@ -19,6 +19,13 @@ Why it’s fast
 Benchmark methodology
 ---------------------
 
+Give each benchmark session a unique artifact directory so paired baseline and candidate JSON
+results cannot overwrite one another. The directory must not already exist:
+
+.. code-block:: bash
+
+   export BENCHMARK_ARTIFACT_DIR="benchmark-results/local-$(date +%Y%m%d-%H%M%S)"
+
 For fast local diwire-only checks:
 
 .. code-block:: bash
@@ -50,7 +57,7 @@ Benchmarked library versions:
 - rodi: ``2.0.8``
 - wireup: ``2.7.0``
 
-Environment (from ``benchmark-results/raw-benchmark.json``):
+Environment (from ``$BENCHMARK_ARTIFACT_DIR/all.json``):
 
 - Python: CPython ``3.14.3``
 - OS/CPU: Darwin arm64 (Apple M3 Pro)
@@ -66,7 +73,8 @@ Methodology details for diwire in these benchmarks:
 Results (diwire vs rodi, dishka, and wireup)
 --------------------------------------------
 
-Source of truth: ``benchmark-results/benchmark-table.json`` (rendered to ``benchmark-results/benchmark-table.md``).
+Source of truth: ``$BENCHMARK_ARTIFACT_DIR/benchmark-table.json`` (rendered to
+``$BENCHMARK_ARTIFACT_DIR/benchmark-table.md``).
 
 .. list-table::
    :header-rows: 1
@@ -182,8 +190,8 @@ conclusions for production workloads.
 Resolve-only comparisons (scope-capable libraries)
 --------------------------------------------------
 
-Source of truth: ``benchmark-results/benchmark-table-resolve.json`` (rendered to
-``benchmark-results/benchmark-table-resolve.md``).
+Source of truth: ``$BENCHMARK_ARTIFACT_DIR/benchmark-table-resolve.json`` (rendered to
+``$BENCHMARK_ARTIFACT_DIR/benchmark-table-resolve.md``).
 
 .. list-table::
    :header-rows: 1

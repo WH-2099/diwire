@@ -17,6 +17,8 @@ jobs:
   benchmarks:
     name: Benchmark Report (Python 3.14)
     runs-on: ubuntu-latest
+    env:
+      BENCHMARK_ARTIFACT_DIR: benchmark-results/${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -33,15 +35,13 @@ jobs:
         run: uv sync --group dev
 
       - name: Run benchmark reports
-        run: |
-          make benchmark-report
-          make benchmark-report-resolve
+        run: make benchmark-report benchmark-report-resolve
 
       - name: Upload benchmark artifacts
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-results
-          path: benchmark-results/*
+          path: benchmark-results/
 
       - name: Post sticky benchmark comment
         if: github.event_name == 'pull_request'
@@ -49,4 +49,4 @@ jobs:
         uses: marocchino/sticky-pull-request-comment@v2
         with:
           header: benchmark-results
-          path: benchmark-results/pr-comment.md
+          path: ${{ env.BENCHMARK_ARTIFACT_DIR }}/pr-comment.md
