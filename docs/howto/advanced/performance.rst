@@ -57,7 +57,8 @@ Benchmarked library versions:
 - rodi: ``2.0.8``
 - wireup: ``2.7.0``
 
-Environment (from ``$BENCHMARK_ARTIFACT_DIR/all.json``):
+Environment for ``make benchmark-report`` (from
+``$BENCHMARK_ARTIFACT_DIR/all.json``):
 
 - Python: CPython ``3.14.3``
 - OS/CPU: Darwin arm64 (Apple M3 Pro)

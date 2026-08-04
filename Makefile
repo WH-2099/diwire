@@ -75,7 +75,11 @@ benchmark-artifact-dir:
 		echo "BENCHMARK_ARTIFACT_DIR already exists; choose a new directory." >&2; \
 		exit 2; \
 	)
-	mkdir -p "$(BENCHMARK_ARTIFACT_DIR)"
+	mkdir -p "$$(dirname "$(BENCHMARK_ARTIFACT_DIR)")"
+	@mkdir "$(BENCHMARK_ARTIFACT_DIR)" || ( \
+		echo "BENCHMARK_ARTIFACT_DIR already exists; choose a new directory." >&2; \
+		exit 2; \
+	)
 
 benchmark:
 	$(MAKE) benchmark-diwire

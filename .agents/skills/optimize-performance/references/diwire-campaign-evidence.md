@@ -35,8 +35,7 @@ results and decision evidence needed to evaluate the precedent are preserved bel
 ## Canonical protocol
 
 - CPython `3.14.6`, GIL enabled.
-- Executable:
-  `/Users/maksimzayats/.local/share/uv/python/cpython-3.14.6-macos-aarch64-none/bin/python3.14`.
+- Executable: `CPython 3.14.6 executable (host path redacted)`.
 - Darwin `25.5.0`, arm64, Apple M3 Pro.
 - AC Power; low power mode off.
 - `uv.lock` SHA-256:
@@ -229,8 +228,9 @@ noise, regression, or semantic risk.
     extensions.
 - `pyproject.toml` still declares `dependencies = []`; `pyproject.toml` and `uv.lock`
   are unchanged from the repository starting commit.
-- Main worktree tracked files and index are clean at final commit `ab4fc5c` on branch
-  `performace-optimizations`. The only untracked non-ignored path is the pre-existing,
+- Main worktree tracked files and index are clean at final commit `ab4fc5c` on the
+  historically misspelled branch `performace-optimizations`. The only untracked non-ignored path
+  is the pre-existing,
   protected `diwire/` nested checkout; it was not modified, moved, staged, committed, or
   included in the sdist.
 - No push, PR, branch switch/rename, history rewrite, amendment, or force operation was
