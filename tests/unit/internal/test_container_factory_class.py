@@ -349,8 +349,10 @@ def test_add_factory_class_rejects_invalid_factory_class(
         ),
         (
             lambda container: container.add_generator_class(_NotFactory),
-            "add_generator_class\\(\\) parameter 'generator_class' must define an instance "
-            "__call__",
+            (
+                "add_generator_class\\(\\) parameter 'generator_class' must define an instance "
+                "__call__"
+            ),
         ),
         (
             lambda container: container.add_generator_class(
@@ -365,8 +367,10 @@ def test_add_factory_class_rejects_invalid_factory_class(
         ),
         (
             lambda container: container.add_context_manager_class(_NotFactory),
-            "add_context_manager_class\\(\\) parameter 'context_manager_class' must define "
-            "an instance __call__",
+            (
+                "add_context_manager_class\\(\\) parameter 'context_manager_class' must define "
+                "an instance __call__"
+            ),
         ),
     ],
 )

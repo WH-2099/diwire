@@ -1,0 +1,4 @@
+interface:
+  display_name: "Optimize Performance"
+  short_description: "Run evidence-driven performance experiments"
+  default_prompt: "Use $optimize-performance to improve this hot path with controlled benchmarks and reversible commits."

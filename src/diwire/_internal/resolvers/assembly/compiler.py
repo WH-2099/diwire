@@ -2175,7 +2175,7 @@ class ResolversAssemblyCompiler:
         resolver_expression: str,
         inline_state: _SyncTransientInlineState | None = None,
         inline_depth: int = 0,
-    ) -> str | None | object:
+    ) -> str | object | None:
         if dependency_plan.kind == "omit":
             return None
         if dependency_plan.kind == "literal":

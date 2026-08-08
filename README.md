@@ -49,9 +49,11 @@ In this benchmark suite on CPython ``3.14.6`` (Apple M3 Pro, strict mode):
 - Resolve-only comparisons (scope-capable libraries): diwire reaches up to **3.53×** (``rodi``), **4.42×** (``dishka``), and **4.38×** (``wireup``).
 - Current benchmark totals: **17** full-suite scenarios and **9** resolve-only scenarios.
 
-For quick local regression checks, run ``make benchmark`` (diwire-only).
-For full cross-library runs, use ``make benchmark-comparison`` (raw suite) or
-``make benchmark-report`` / ``make benchmark-report-resolve`` (report artifacts).
+Set a new, unique artifact directory before each benchmark session, for example
+``export BENCHMARK_ARTIFACT_DIR="benchmark-results/local-$(date +%Y%m%d-%H%M%S)"``.
+Then run ``make benchmark`` for a quick diwire-only check, ``make benchmark-comparison`` for the
+raw cross-library suite, or ``make benchmark-report`` / ``make benchmark-report-resolve`` for
+report artifacts.
 
 ## Quick start (pure Python auto-wiring)
 
@@ -76,6 +78,7 @@ class UserRepository:
 @dataclass
 class UserService:
     repo: UserRepository
+
 
 container = Container()
 service = container.resolve(UserService)
@@ -136,6 +139,7 @@ container = Container()
 
 def build_answer() -> int:
     return 42
+
 
 container.add_factory(build_answer)
 
