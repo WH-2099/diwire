@@ -2757,8 +2757,7 @@ class Container:
                     async_callable = cast("Callable[..., Awaitable[Any]]", callable_obj)
                     return await async_callable(*bound_arguments.args, **bound_arguments.kwargs)
 
-                async_scoped_resolver = cast("Any", maybe_scoped)
-                async with async_scoped_resolver:
+                async with maybe_scoped:
                     bound_arguments = await self._resolve_async_injected_arguments(
                         resolver=maybe_scoped,
                         signature=signature,
@@ -3709,11 +3708,11 @@ class Container:
         finally:
             self._entered_root_resolver = None
 
-    def __aenter__(self) -> ResolverProtocol:
+    async def __aenter__(self) -> ResolverProtocol:
         """Asynchronously enter the resolver context."""
         resolver = self.compile()
         self._entered_root_resolver = resolver
-        return resolver.__aenter__()
+        return await resolver.__aenter__()
 
     async def __aexit__(
         self,

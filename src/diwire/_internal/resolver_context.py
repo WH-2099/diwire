@@ -129,7 +129,7 @@ class _ResolverBoundResolver:
             self._pop_resolver()
 
     async def __aenter__(self) -> Self:
-        await cast("Any", self._resolver).__aenter__()
+        await self._resolver.__aenter__()
         self._push_resolver(cast("ResolverProtocol", self))
         return self
 

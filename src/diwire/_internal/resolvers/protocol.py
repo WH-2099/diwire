@@ -69,7 +69,7 @@ class ResolverProtocol(Protocol):
         Like context managers or generators.
         """
 
-    def __aenter__(self) -> Self:
+    async def __aenter__(self) -> Self:
         """Asynchronously enter the resolver context."""
 
     async def __aexit__(
