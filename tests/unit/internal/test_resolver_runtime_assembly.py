@@ -1,3 +1,4 @@
+# mypy: enable-error-code="misc"
 from __future__ import annotations
 
 import asyncio
